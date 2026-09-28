@@ -1,0 +1,29 @@
+services:
+  api:
+    build: ../backend
+    restart: unless-stopped
+    environment:
+      DB_URL: ${DB_URL:?RDS JDBC URL with sslMode=VERIFY_IDENTITY required}
+      DB_USER: ${DB_USER:-foodify}
+      DB_PASSWORD: ${DB_PASSWORD:?required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?required}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      AI_MONTHLY_REQUEST_LIMIT: ${AI_MONTHLY_REQUEST_LIMIT:-100}
+      PHOTO_STORAGE: s3
+      S3_BUCKET: ${S3_BUCKET:?private bucket required}
+      AWS_REGION: ap-northeast-2
+    mem_limit: 1200m
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?HTTPS domain required}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on: [api]
+volumes:
+  caddy-data:

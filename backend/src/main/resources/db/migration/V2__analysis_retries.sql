@@ -1,0 +1,2 @@
+ALTER TABLE analyses ADD attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ai_usage ADD prompt_version VARCHAR(30) NOT NULL DEFAULT 'v1';
