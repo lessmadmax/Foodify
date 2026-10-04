@@ -40,6 +40,12 @@ public class AnalysisWorker {
                 output.put("candidates",foods.search(item.path("name").asText()));items.add(output);
             }
             suggestMatches(items);
+            // Preview nutrients while preserving the user's confirmation step.
+            for(var item:items) {
+                var calculated=foods.calculate(json.read(json.write(item)));
+                item.put("nutrition",calculated.get("nutrition"));
+                item.put("source",calculated.get("source"));
+            }
             finish(id,meal,version,json.write(items),"USER_REVIEW_REQUIRED");
         } catch(Exception e) {
             String error=e instanceof ApiError ae?ae.code:"ANALYSIS_FAILED";

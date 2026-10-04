@@ -7,7 +7,10 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-dependencies { implementation("com.google.ar:core:1.48.0") }
+dependencies {
+    implementation("com.google.ar:core:1.48.0")
+    testImplementation("junit:junit:4.13.2")
+}
 
 val signingFile = rootProject.file("key.properties")
 val signingValues = Properties().apply { if (signingFile.exists()) signingFile.inputStream().use { load(it) } }
@@ -15,7 +18,7 @@ val signingValues = Properties().apply { if (signingFile.exists()) signingFile.i
 android {
     namespace = "com.example.foodify"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11

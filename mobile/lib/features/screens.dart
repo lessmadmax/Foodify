@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../core/api.dart';
 import '../core/pending_upload.dart';
 import '../core/ar_capabilities.dart';
+import '../core/meal_review.dart';
 
 String date(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
@@ -25,6 +26,15 @@ Widget body(List<Widget> children) => Center(
   ),
 );
 Widget gap() => const SizedBox(height: 16);
+
+String analysisHint(dynamic code) => switch (code) {
+  'USER_REVIEW_REQUIRED' => '참고 추정치가 준비됐습니다. 음식·중량·DB 항목 확인 후 저장하면 합계에 반영됩니다.',
+  'OPENAI_NOT_CONFIGURED' => '서버 API 키 설정이 필요합니다.',
+  'OPENAI_HTTP_401' => '서버의 API 인증 설정을 확인해 주세요.',
+  'OPENAI_HTTP_429' => 'AI 요청 한도 또는 결제 잔액을 확인해 주세요.',
+  'AI_BUDGET_REACHED' => '이번 달 분석 요청 한도에 도달했습니다.',
+  _ => '분석을 완료하지 못했습니다. 다시 분석을 요청해 주세요. ($code)',
+};
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -119,10 +129,11 @@ class GoalsScreen extends ConsumerStatefulWidget {
 
 class _GoalsState extends ConsumerState<GoalsScreen> {
   final fields = {
-    for (final k in ['purpose', 'kcal', 'carbs', 'protein', 'fat'])
-      k: TextEditingController(),
+    for (final k in ['age', 'heightCm', 'weightKg']) k: TextEditingController(),
   };
-  bool busy = false;
+  String? sex, activity;
+  bool busy = false, loading = true, generalAdult = false;
+  Map<String, dynamic>? estimate;
   @override
   void initState() {
     super.initState();
@@ -131,13 +142,23 @@ class _GoalsState extends ConsumerState<GoalsScreen> {
         final me = await ref.read(apiProvider).request('GET', '/me');
         if (mounted) {
           setState(() {
-            for (final k in fields.keys) {
-              fields[k]!.text = me['goals'][k]?.toString() ?? '';
+            final goals = Map<String, dynamic>.from(me['goals']);
+            final profile = goals['profile'];
+            if (profile is Map) {
+              for (final k in fields.keys) {
+                fields[k]!.text = profile[k]?.toString() ?? '';
+              }
+              sex = profile['sex'];
+              activity = profile['activityLevel'];
+              generalAdult = profile['generalAdultConfirmed'] == true;
+              estimate = goals;
             }
           });
         }
       } catch (e) {
         if (mounted) notify(context, e);
+      } finally {
+        if (mounted) setState(() => loading = false);
       }
     });
   }
@@ -150,20 +171,48 @@ class _GoalsState extends ConsumerState<GoalsScreen> {
     super.dispose();
   }
 
-  Future<void> save() async {
+  Map<String, dynamic> input() {
+    final age = int.tryParse(fields['age']!.text.trim());
+    final height = double.tryParse(fields['heightCm']!.text.trim());
+    final weight = double.tryParse(fields['weightKg']!.text.trim());
+    if (age == null ||
+        height == null ||
+        weight == null ||
+        !height.isFinite ||
+        !weight.isFinite ||
+        sex == null ||
+        activity == null) {
+      throw StateError('나이·성별·키·몸무게·활동량을 확인해 주세요.');
+    }
+    if (age < 19 || age > 78 || !generalAdult) {
+      throw StateError(
+        '현재 자동 계산은 만 19~78세 일반 성인 기준입니다. 적용 범위를 확인하거나 기록부터 시작해 주세요.',
+      );
+    }
+    return {
+      'age': age,
+      'sex': sex,
+      'heightCm': height,
+      'weightKg': weight,
+      'activityLevel': activity,
+      'generalAdultConfirmed': generalAdult,
+    };
+  }
+
+  Future<void> calculate({bool save = false}) async {
     setState(() => busy = true);
     try {
-      final data = <String, dynamic>{'purpose': fields['purpose']!.text};
-      for (final k in ['kcal', 'carbs', 'protein', 'fat']) {
-        final text = fields[k]!.text.trim();
-        final n = double.tryParse(text);
-        if (text.isNotEmpty && (n == null || !n.isFinite || n <= 0)) {
-          throw StateError('양수인 목표 수치를 입력해 주세요.');
-        }
-        data[k] = n;
+      final result = await ref
+          .read(apiProvider)
+          .request(
+            save ? 'PUT' : 'POST',
+            save ? '/me/goals' : '/me/goals/preview',
+            data: input(),
+          );
+      if (mounted) {
+        setState(() => estimate = Map<String, dynamic>.from(result));
+        if (save) context.go('/home');
       }
-      await ref.read(apiProvider).request('PUT', '/me/goals', data: data);
-      if (mounted) context.go('/home');
     } catch (e) {
       if (mounted) notify(context, e);
     } finally {
@@ -175,25 +224,108 @@ class _GoalsState extends ConsumerState<GoalsScreen> {
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('내 영양 목표')),
     body: body([
-      const Text('직접 정한 일일 목표를 입력하세요. 비워둔 항목은 기록 중심으로 안내합니다.'),
+      const Text('신체정보와 평소 활동량으로 하루 체중 유지 열량과 3대 영양소 목표를 계산합니다.'),
+      const Text('정보는 목표 저장 시 계정에 저장됩니다. 신체정보 원문은 피드백 AI에 전달하지 않습니다.'),
+      if (loading) const LinearProgressIndicator(),
       gap(),
       for (final e in {
-        'purpose': '관리 목적',
-        'kcal': '열량 (kcal)',
-        'carbs': '탄수화물 (g)',
-        'protein': '단백질 (g)',
-        'fat': '지방 (g)',
+        'age': '만 나이 (세)',
+        'heightCm': '키 (cm)',
+        'weightKg': '몸무게 (kg)',
       }.entries) ...[
         TextField(
+          enabled: !busy && !loading,
           controller: fields[e.key],
-          keyboardType: e.key == 'purpose'
-              ? TextInputType.text
-              : const TextInputType.numberWithOptions(decimal: true),
+          keyboardType: TextInputType.numberWithOptions(
+            decimal: e.key != 'age',
+          ),
           decoration: InputDecoration(labelText: e.value),
+          onChanged: (_) => setState(() => estimate = null),
         ),
         gap(),
       ],
-      FilledButton(onPressed: busy ? null : save, child: const Text('목표 저장')),
+      DropdownButtonFormField<String>(
+        value: sex,
+        decoration: const InputDecoration(labelText: '계산식에 사용할 성별'),
+        items: const [
+          DropdownMenuItem(value: 'MALE', child: Text('남성')),
+          DropdownMenuItem(value: 'FEMALE', child: Text('여성')),
+        ],
+        onChanged: busy || loading
+            ? null
+            : (v) => setState(() {
+                sex = v;
+                estimate = null;
+              }),
+      ),
+      gap(),
+      DropdownButtonFormField<String>(
+        value: activity,
+        isExpanded: true,
+        decoration: const InputDecoration(labelText: '평소 활동량'),
+        items: const [
+          DropdownMenuItem(
+            value: 'SEDENTARY',
+            child: Text('낮음 · 앉아서 생활, 운동 거의 없음'),
+          ),
+          DropdownMenuItem(value: 'LIGHT', child: Text('가벼움 · 가벼운 운동 주 1~3일')),
+          DropdownMenuItem(
+            value: 'MODERATE',
+            child: Text('보통 · 중간 강도 운동 주 3~5일'),
+          ),
+          DropdownMenuItem(
+            value: 'ACTIVE',
+            child: Text('높음 · 높은 활동량, 운동 주 6~7일'),
+          ),
+        ],
+        onChanged: busy || loading
+            ? null
+            : (v) => setState(() {
+                activity = v;
+                estimate = null;
+              }),
+      ),
+      gap(),
+      const Text(
+        '자동 계산 적용 범위: 만 19~78세 일반 성인. 성장기·임신·수유·질환별 영양 관리는 별도 기준이 필요합니다. 해당하는 경우 기록 기능부터 이용해 주세요.',
+      ),
+      CheckboxListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('일반 성인 기준이 적용되며 별도 영양 처방이 필요한 상태가 아님을 확인했습니다'),
+        value: generalAdult,
+        onChanged: busy || loading
+            ? null
+            : (v) => setState(() {
+                generalAdult = v ?? false;
+                estimate = null;
+              }),
+      ),
+      FilledButton(
+        onPressed: busy || loading ? null : () => calculate(),
+        child: Text(busy ? '계산 중…' : '목표 자동 계산'),
+      ),
+      if (estimate != null) ...[
+        gap(),
+        Text(
+          '하루 참고 목표: ${estimate!['kcal']} kcal',
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
+        Text(
+          '탄수화물 ${estimate!['carbs']} g · 단백질 ${estimate!['protein']} g · 지방 ${estimate!['fat']} g',
+        ),
+        const Text(
+          'Mifflin–St Jeor 안정 시 대사량 × 활동 계수. 탄·단·지 열량 배분 50:20:30은 앱 기본값이며, 개인별 처방값이 아닙니다.',
+        ),
+        gap(),
+        FilledButton(
+          onPressed: busy || loading ? null : () => calculate(save: true),
+          child: const Text('이 목표 저장'),
+        ),
+      ],
+      TextButton(
+        onPressed: busy ? null : () => context.go('/home'),
+        child: const Text('목표 설정은 나중에 · 기록부터 시작'),
+      ),
     ]),
   );
 }
@@ -500,13 +632,30 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
             ? null
             : () async {
                 final result = await ArCapabilities.check();
-                if (mounted)
+                if (mounted) {
                   setState(
                     () => arInfo =
                         '${result['device'] ?? ''}\nARCore: ${result['arCore']} · 깊이: ${result['depth'] ?? '확인 필요'}\n${result['reason'] ?? ''}',
                   );
+                }
               },
         child: const Text('이 기기의 AR 지원 확인'),
+      ),
+      OutlinedButton.icon(
+        onPressed: busy
+            ? null
+            : () async {
+                try {
+                  await ArCapabilities.openDiagnostics();
+                } catch (e) {
+                  if (context.mounted) notify(context, e);
+                }
+              },
+        icon: const Icon(Icons.view_in_ar),
+        label: const Text('AR 깊이 진단 · 실험'),
+      ),
+      const Text(
+        'AR 진단은 깊이·신뢰도를 확인하는 별도 실험입니다. 저장 데이터는 기기에 보관되며 식단 분석에 자동 반영되지 않습니다.',
       ),
       if (arInfo != null) Text(arInfo!),
       OutlinedButton.icon(
@@ -543,6 +692,9 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
   List<Map<String, dynamic>> items = [];
   Timer? timer;
   String? error;
+  String? saveNotice;
+  bool saving = false, conflict = false;
+  int loadGeneration = 0, formGeneration = 0;
   bool busy = false, dirty = false, loading = false;
   @override
   void initState() {
@@ -550,7 +702,9 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     Future.microtask(load);
     timer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (!dirty && ['QUEUED', 'RUNNING'].contains(meal?['status'])) load();
+      if (!busy && !dirty && ['QUEUED', 'RUNNING'].contains(meal?['status'])) {
+        load();
+      }
     });
   }
 
@@ -567,25 +721,139 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
   }
 
   Future<void> load() async {
-    if (loading) return;
+    if (loading || busy) return;
     loading = true;
+    final generation = ++loadGeneration;
     try {
       final result = await ref
           .read(apiProvider)
           .request('GET', '/meals/${widget.id}');
-      if (mounted && !dirty) {
-        setState(() {
-          meal = Map<String, dynamic>.from(result);
-          items = (result['items'] as List)
-              .map((i) => Map<String, dynamic>.from(i))
-              .toList();
-          error = null;
-        });
+      if (mounted && !dirty && !busy && generation == loadGeneration) {
+        setState(() => applyMeal(result));
       }
     } catch (e) {
-      if (mounted) setState(() => error = errorText(e));
+      if (mounted && generation == loadGeneration) {
+        setState(() => error = errorText(e));
+      }
     } finally {
       loading = false;
+    }
+  }
+
+  void applyMeal(dynamic result) {
+    meal = Map<String, dynamic>.from(result);
+    items = (result['items'] as List)
+        .map((i) => Map<String, dynamic>.from(i))
+        .toList();
+    formGeneration++;
+    error = null;
+  }
+
+  void changed([int? index]) {
+    dirty = true;
+    saveNotice = null;
+    if (index != null) {
+      items[index]['nutrition'] = null;
+      items[index]['confirmed'] = false;
+    }
+  }
+
+  Future<void> saveMeal() async {
+    if (busy || meal == null) return;
+    FocusScope.of(context).unfocus();
+    for (var i = 0; i < items.length; i++) {
+      final name = (items[i]['name'] ?? '').toString().trim();
+      final grams = items[i]['grams'];
+      if (name.isEmpty ||
+          name.length > 200 ||
+          (grams != null &&
+              (grams is! num ||
+                  !grams.isFinite ||
+                  grams <= 0 ||
+                  grams > 10000))) {
+        final message = name.isEmpty || name.length > 200
+            ? '${i + 1}번째 음식명을 1~200자로 입력해 주세요.'
+            : '${i + 1}번째 중량을 0보다 크고 10,000g 이하로 입력해 주세요.';
+        setState(() => error = message);
+        notify(context, message);
+        return;
+      }
+    }
+    setState(() {
+      busy = true;
+      saving = true;
+      error = null;
+      saveNotice = null;
+      conflict = false;
+    });
+    ++loadGeneration; // Invalidate reads that started before this write.
+    final payload = {
+      'version': meal!['version'],
+      'items': [
+        for (final item in items)
+          {
+            'name': item['name'],
+            'grams': item['grams'],
+            'foodId': item['foodId'],
+            'confirmed': item['confirmed'] == true,
+          },
+      ],
+    };
+    try {
+      final result = await ref
+          .read(apiProvider)
+          .request('PATCH', '/meals/${widget.id}', data: payload);
+      if (!mounted) return;
+      setState(() {
+        applyMeal(result);
+        dirty = false;
+        saveNotice = mealSaveSummary(meal!);
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(saveNotice!)));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        error = '저장 실패 · ${errorText(e)}';
+        conflict = errorText(e).contains('기록이 변경되었습니다');
+      });
+      notify(context, error!);
+    } finally {
+      if (mounted) {
+        setState(() {
+          busy = false;
+          saving = false;
+        });
+      }
+    }
+  }
+
+  Future<void> reloadConflict() async {
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('최신 기록을 불러올까요?'),
+        content: const Text('현재 화면의 저장되지 않은 수정 내용은 최신 서버 기록으로 바뀝니다.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('계속 수정'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('최신 기록 불러오기'),
+          ),
+        ],
+      ),
+    );
+    if (yes == true && mounted) {
+      setState(() {
+        dirty = false;
+        conflict = false;
+        saveNotice = null;
+      });
+      await load();
     }
   }
 
@@ -638,7 +906,9 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
         setState(() {
           items[index]['foodId'] = selected['id'];
           items[index]['name'] = selected['name'];
-          dirty = true;
+          items[index]['source'] = selected;
+          changed(index);
+          formGeneration++;
         });
       }
     } catch (e) {
@@ -653,7 +923,10 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
     } catch (e) {
       if (mounted) notify(context, e);
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() => busy = false);
+        await load();
+      }
     }
   }
 
@@ -667,13 +940,20 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
           icon: const Icon(Icons.home),
         ),
         IconButton(
-          onPressed: dirty ? null : load,
+          onPressed: dirty || busy ? null : load,
           icon: const Icon(Icons.refresh),
         ),
       ],
     ),
     body: body([
       if (error != null) Text(error!),
+      if (conflict)
+        TextButton(
+          onPressed: busy ? null : reloadConflict,
+          child: const Text('최신 기록 불러오기'),
+        ),
+      if (saveNotice != null)
+        Text(saveNotice!, key: const ValueKey('save-notice')),
       if (meal == null) const LinearProgressIndicator(),
       if (meal != null) ...[
         Text(
@@ -682,8 +962,16 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
         ),
         gap(),
         const Text('식전 제공량 기준 추정치입니다. 실제 먹은 중량과 영양 DB 항목을 확인한 후 저장하세요.'),
-        for (final a in meal!['analyses'] as List)
-          if (a['error_code'] != null) Text('분석 안내: ${a['error_code']}'),
+        if (meal!['status'] == 'QUEUED' && meal!['analysisEnabled'] == false)
+          const Text('서버의 자동 분석이 일시 중지되어 있습니다. 사진은 저장됐으며 분석이 활성화되면 처리됩니다.'),
+        if (meal!['status'] == 'QUEUED' && meal!['analysisEnabled'] != false)
+          const Text('분석 순서를 기다리고 있습니다. 완료되면 결과가 자동 표시됩니다.'),
+        for (final a
+            in (meal!['status'] == 'COMPLETE' || saveNotice != null
+                    ? []
+                    : meal!['analyses'])
+                as List)
+          if (a['error_code'] != null) Text(analysisHint(a['error_code'])),
         gap(),
         for (var i = 0; i < items.length; i++)
           Card(
@@ -693,28 +981,30 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   TextFormField(
+                    enabled: !busy,
                     key: ValueKey(
-                      'name-${meal!['version']}-$i-${items[i]['foodId']}',
+                      'name-$formGeneration-$i-${items[i]['foodId']}',
                     ),
                     initialValue: items[i]['name'],
                     decoration: const InputDecoration(labelText: '음식명'),
-                    onChanged: (v) {
+                    onChanged: (v) => setState(() {
                       items[i]['name'] = v;
-                      dirty = true;
-                    },
+                      changed(i);
+                    }),
                   ),
                   gap(),
                   TextFormField(
-                    key: ValueKey('grams-${meal!['version']}-$i'),
+                    enabled: !busy,
+                    key: ValueKey('grams-$formGeneration-$i'),
                     initialValue: items[i]['grams']?.toString() ?? '',
                     keyboardType: const TextInputType.numberWithOptions(
                       decimal: true,
                     ),
                     decoration: const InputDecoration(labelText: '먹은 중량 (g)'),
-                    onChanged: (v) {
+                    onChanged: (v) => setState(() {
                       items[i]['grams'] = double.tryParse(v);
-                      dirty = true;
-                    },
+                      changed(i);
+                    }),
                   ),
                   TextButton(
                     onPressed: busy ? null : () => search(i),
@@ -726,8 +1016,14 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                   ),
                   if (items[i]['nutrition'] != null)
                     Text(
-                      '${items[i]['nutrition']['kcal']} kcal · ${items[i]['source']?['source'] ?? ''}',
+                      '참고 추정: ${items[i]['nutrition']['kcal']} kcal\n탄수화물 ${items[i]['nutrition']['carbs']} g · 단백질 ${items[i]['nutrition']['protein']} g · 지방 ${items[i]['nutrition']['fat']} g\n자료원: ${items[i]['source']?['source'] ?? ''}',
                     ),
+                  for (final issue in mealItemIssues(items[i]))
+                    Text('• $issue'),
+                  if (dirty && items[i]['nutrition'] == null)
+                    const Text('입력값이 변경되었습니다. 저장하면 영양값을 다시 계산합니다.'),
+                  if ((items[i]['uncertainty'] ?? '').toString().isNotEmpty)
+                    Text('추정 참고: ${items[i]['uncertainty']}'),
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('음식·중량·DB 항목을 확인했습니다'),
@@ -736,7 +1032,7 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                         ? null
                         : (v) => setState(() {
                             items[i]['confirmed'] = v;
-                            dirty = true;
+                            changed();
                           }),
                   ),
                   TextButton(
@@ -744,7 +1040,8 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                         ? null
                         : () => setState(() {
                             items.removeAt(i);
-                            dirty = true;
+                            changed();
+                            formGeneration++;
                           }),
                     child: const Text('이 음식 삭제'),
                   ),
@@ -762,26 +1059,18 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                     'foodId': '',
                     'confirmed': false,
                   });
-                  dirty = true;
+                  changed();
                 }),
           child: const Text('음식 추가'),
         ),
         FilledButton(
-          onPressed: busy
-              ? null
-              : () => action(() async {
-                  await ref
-                      .read(apiProvider)
-                      .request(
-                        'PATCH',
-                        '/meals/${widget.id}',
-                        data: {'version': meal!['version'], 'items': items},
-                      );
-                  dirty = false;
-                  await load();
-                }),
-          child: const Text('수정 저장 · 영양 재계산'),
+          onPressed: busy ? null : saveMeal,
+          child: Text(saving ? '저장 및 영양 재계산 중…' : '수정 저장 · 영양 재계산'),
         ),
+        if (saving) const LinearProgressIndicator(),
+        if (saveNotice != null) Text(saveNotice!),
+        if (error != null) Text(error!),
+        const Text('이 버튼은 입력한 중량과 DB 자료로 계산합니다. 사진 재분석은 아래 AI 분석 버튼을 이용해 주세요.'),
         TextButton(
           onPressed:
               busy || dirty || ['QUEUED', 'RUNNING'].contains(meal!['status'])

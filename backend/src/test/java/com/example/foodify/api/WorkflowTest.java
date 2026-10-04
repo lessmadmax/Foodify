@@ -47,6 +47,31 @@ class WorkflowTest {
         mvc.perform(get("/api/v1/meals/"+first.path("id").asText()).header("Authorization","Bearer "+other)).andExpect(status().isNotFound());
         mvc.perform(get("/api/v1/photos/"+first.path("photos").get(0).path("id").asText()).header("Authorization","Bearer "+other)).andExpect(status().isNotFound());
     }
+    @Test void autoGoalsArePreviewedAndSavedForOwnerOnly() throws Exception {
+        String profile="{\"age\":30,\"sex\":\"MALE\",\"heightCm\":180,\"weightKg\":80,\"activityLevel\":\"SEDENTARY\",\"generalAdultConfirmed\":true,\"kcal\":1,\"purpose\":\"ignored\"}";
+        mvc.perform(post("/api/v1/me/goals/preview").header("Authorization","Bearer "+token).contentType("application/json").content(profile))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.kcal").value(2136));
+        mvc.perform(get("/api/v1/me").header("Authorization","Bearer "+token)).andExpect(jsonPath("$.goals.kcal").doesNotExist());
+        mvc.perform(put("/api/v1/me/goals").header("Authorization","Bearer "+token).contentType("application/json").content(profile))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.kcal").value(2136)).andExpect(jsonPath("$.purpose").doesNotExist());
+        mvc.perform(get("/api/v1/me").header("Authorization","Bearer "+token)).andExpect(jsonPath("$.goals.profile.age").value(30));
+        mvc.perform(get("/api/v1/me").header("Authorization","Bearer "+other)).andExpect(jsonPath("$.goals.kcal").doesNotExist());
+        mvc.perform(post("/api/v1/me/goals/preview").contentType("application/json").content(profile)).andExpect(status().isUnauthorized());
+    }
+    @Test void analysisPreviewHasNutritionButRemainsUnconfirmed() throws Exception {
+        db.update("UPDATE analyses SET status='SUPERSEDED' WHERE status='QUEUED'");
+        JsonNode meal=upload(UUID.randomUUID().toString());
+        var fake=org.mockito.Mockito.mock(OpenAiClient.class);
+        org.mockito.Mockito.when(fake.analyze(org.mockito.ArgumentMatchers.anyList())).thenReturn(json.read("{\"items\":[{\"name\":\"시험 음식\",\"grams\":150,\"ingredients\":[],\"uncertainty\":\"사진 추정\"}]}"));
+        org.mockito.Mockito.when(fake.chooseCandidates(org.mockito.ArgumentMatchers.any())).thenReturn(json.read("{\"selections\":[{\"index\":0,\"foodId\":\"test-food\"}]}"));
+        new AnalysisWorker(db,tx,fake,photos,json,foods).tick();
+        var result=meals.get(auth.member(token),meal.path("id").asText());
+        var item=((JsonNode)result.get("items")).get(0);
+        assertEquals(300,item.path("nutrition").path("kcal").asInt());
+        assertFalse(item.path("confirmed").asBoolean());
+        assertEquals("INCOMPLETE",result.get("status"));
+        assertEquals(false,result.get("analysisEnabled"));
+    }
     @Test void correctionRecalculatesAndProtectsVersion() throws Exception {
         JsonNode meal=upload(UUID.randomUUID().toString());String id=meal.path("id").asText();
         String patch="{\"version\":0,\"items\":[{\"name\":\"시험 음식\",\"foodId\":\"test-food\",\"grams\":150,\"confirmed\":true}]}";

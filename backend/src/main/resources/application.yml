@@ -19,7 +19,7 @@ app:
   worker-enabled: ${WORKER_ENABLED:true}
   openai:
     api-key: ${OPENAI_API_KEY:}
-    model: ${OPENAI_MODEL:gpt-4.1-mini}
+    model: ${OPENAI_MODEL:gpt-4o-mini}
     base-url: https://api.openai.com/v1
     monthly-request-limit: ${AI_MONTHLY_REQUEST_LIMIT:100}
 

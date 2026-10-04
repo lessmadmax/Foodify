@@ -11,6 +11,8 @@ import java.util.*;
 
 @Service
 public class MealService {
+    @org.springframework.beans.factory.annotation.Value("${app.worker-enabled:true}")
+    private boolean workerEnabled;
     private final JdbcTemplate db; private final Json json; private final FoodService foods;
     public MealService(JdbcTemplate db,Json json,FoodService foods) {this.db=db;this.json=json;this.foods=foods;}
     public Map<String,Object> get(String member,String id) {
@@ -20,6 +22,7 @@ public class MealService {
         row.put("capture_info",json.read((String)row.get("capture_info")));
         row.put("photos",db.queryForList("SELECT id FROM photos WHERE meal_id=?",id));
         row.put("analyses",db.queryForList("SELECT id,status,error_code FROM analyses WHERE meal_id=? ORDER BY created_at DESC",id));
+        row.put("analysisEnabled",workerEnabled);
         return row;
     }
     public List<Map<String,Object>> list(String member) {

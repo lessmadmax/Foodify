@@ -1,5 +1,7 @@
 # Foodify 구현 현황과 실행 안내
 
+> 최신 진척과 완료 근거는 [전체 작업 체크리스트](PROJECT_CHECKLIST.md)를 기준으로 확인한다. 자동 목표는 [AUTO_GOALS.md](AUTO_GOALS.md), 실제 영양 카탈로그 적재는 [NUTRITION_DATABASE.md](NUTRITION_DATABASE.md), AR 진단은 [AR_DIAGNOSTICS.md](AR_DIAGNOSTICS.md)에 정리되어 있다. 아래 일부 초기 실행·구현 설명은 후속 정합성 검수 대상이다.
+
 ## 현재 구현 범위
 
 이 저장소는 실제 서버·앱 구현을 포함한다. 전체 8주 계획의 최종 검증 완료 상태와 구분하여 사용한다.

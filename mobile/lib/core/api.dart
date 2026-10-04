@@ -123,6 +123,9 @@ String errorText(Object e) {
     final code = body is Map ? body['code'] : null;
     return switch (code) {
       'OPENAI_NOT_CONFIGURED' => '서버에 OpenAI API 키 설정이 필요합니다.',
+      'INVALID_PROFILE' => '나이·성별·키(100~250cm)·몸무게(25~350kg)·활동량을 확인해 주세요.',
+      'GOAL_SCOPE_CONFIRMATION_REQUIRED' =>
+        '자동 목표는 만 19~78세 일반 성인 기준입니다. 적용 범위를 확인해 주세요.',
       'AI_BUDGET_REACHED' => '이번 달 AI 요청 한도에 도달했습니다.',
       'STALE_VERSION' => '기록이 변경되었습니다. 새로고침 후 수정해 주세요.',
       'UNAUTHORIZED' => '로그인이 만료되었습니다. 다시 로그인해 주세요.',

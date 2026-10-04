@@ -1,5 +1,6 @@
 package com.example.foodify.api;
 import com.example.foodify.ai.OpenAiClient;
+import com.example.foodify.goal.GoalCalculator;
 import com.example.foodify.auth.AuthService;
 import com.example.foodify.meal.MealService;
 import com.example.foodify.food.FoodService;
@@ -18,15 +19,14 @@ public class AppController {
     private final JdbcTemplate db;private final MealService meals;private final FoodService foods;private final PhotoStore photos;private final Json json;private final OpenAiClient ai;
     public AppController(JdbcTemplate db,MealService meals,FoodService foods,PhotoStore photos,Json json,OpenAiClient ai) {this.db=db;this.meals=meals;this.foods=foods;this.photos=photos;this.json=json;this.ai=ai;}
     @GetMapping("/me") public Map<String,Object> me(Principal p) {
-        var row=db.queryForMap("SELECT id,email,goals FROM members WHERE id=?",p.getName());row.put("goals",json.read((String)row.get("goals")));return row;
+        var row=db.queryForMap("SELECT id,email,goals FROM members WHERE id=?",p.getName());
+        var goals=json.read((String)row.get("goals"));
+        if(goals.isObject()) ((com.fasterxml.jackson.databind.node.ObjectNode)goals).remove("purpose");
+        row.put("goals",goals);return row;
     }
+    @PostMapping("/me/goals/preview") public Object previewGoals(@RequestBody JsonNode body) {return GoalCalculator.calculate(body);}
     @PutMapping("/me/goals") public Object goals(Principal p,@RequestBody JsonNode body) {
-        var validated=new LinkedHashMap<String,Object>();
-        String purpose=body.path("purpose").asText("");if(purpose.length()>100) throw ApiError.bad("GOAL_LENGTH");validated.put("purpose",purpose);
-        for(String n:List.of("kcal","carbs","protein","fat")) {
-            JsonNode v=body.path(n);if(v.isMissingNode()||v.isNull()) validated.put(n,null);
-            else {if(!v.isNumber()||v.asDouble()<=0||v.asDouble()>20000) throw ApiError.bad("INVALID_GOAL");validated.put(n,v.decimalValue());}
-        }
+        var validated=GoalCalculator.calculate(body);
         db.update("UPDATE members SET goals=? WHERE id=?",json.write(validated),p.getName());return validated;
     }
     @DeleteMapping("/me") public void deleteMe(Principal p) {meals.deleteMember(p.getName());}
@@ -64,7 +64,10 @@ public class AppController {
     @GetMapping("/nutrition/summary") public Object summary(Principal p,@RequestParam LocalDate from,@RequestParam LocalDate to) {return meals.summary(p.getName(),from,to);}
     private String evidence(String member,LocalDate from,LocalDate to) {
         var revisions=db.queryForList("SELECT id,version,status FROM meals WHERE member_id=? AND eaten_at>=? AND eaten_at<? ORDER BY id",member,from.atStartOfDay(ZoneId.of("Asia/Seoul")).toInstant().toEpochMilli(),to.plusDays(1).atStartOfDay(ZoneId.of("Asia/Seoul")).toInstant().toEpochMilli());
-        return json.write(Map.of("summary",meals.summary(member,from,to),"revisions",revisions,"goals",json.read(db.queryForObject("SELECT goals FROM members WHERE id=?",String.class,member))));
+        var stored=json.read(db.queryForObject("SELECT goals FROM members WHERE id=?",String.class,member));
+        var goals=new LinkedHashMap<String,Object>();
+        for(String key:List.of("kcal","carbs","protein","fat","calculation")) if(stored.has(key)) goals.put(key,stored.get(key));
+        return json.write(Map.of("summary",meals.summary(member,from,to),"revisions",revisions,"goals",goals));
     }
     @PostMapping("/feedback") public Object feedback(Principal p,@RequestBody JsonNode body) {
         LocalDate from=LocalDate.parse(body.path("from").asText()),to=LocalDate.parse(body.path("to").asText());

@@ -16,7 +16,7 @@ class FakeAdapter implements HttpClientAdapter {
     Future<void>? cancel,
   ) async {
     calls.add(options);
-    if (options.path == '/auth/refresh')
+    if (options.path == '/auth/refresh') {
       return ResponseBody.fromString(
         '{"accessToken":"new","refreshToken":"next","memberId":"member"}',
         200,
@@ -24,7 +24,8 @@ class FakeAdapter implements HttpClientAdapter {
           'content-type': ['application/json'],
         },
       );
-    if (options.headers['Authorization'] == 'Bearer old')
+    }
+    if (options.headers['Authorization'] == 'Bearer old') {
       return ResponseBody.fromString(
         '{"code":"UNAUTHORIZED"}',
         401,
@@ -32,6 +33,7 @@ class FakeAdapter implements HttpClientAdapter {
           'content-type': ['application/json'],
         },
       );
+    }
     return ResponseBody.fromString(
       '{}',
       200,
