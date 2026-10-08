@@ -30,14 +30,22 @@ public class AppController {
         db.update("UPDATE members SET goals=? WHERE id=?",json.write(validated),p.getName());return validated;
     }
     @DeleteMapping("/me") public void deleteMe(Principal p) {meals.deleteMember(p.getName());}
+    @org.springframework.beans.factory.annotation.Autowired private AiConsent consentService;
+    @GetMapping("/me/ai-consent") public Object consent(Principal p) {return consentService.get(p.getName());}
+    @PutMapping("/me/ai-consent") public Object acceptConsent(Principal p,@RequestBody JsonNode body) {
+        if(!body.path("accepted").asBoolean(false)) throw ApiError.bad("AI_CONSENT_REQUIRED");
+        return consentService.accept(p.getName(),body.path("version").asText());
+    }
+    @DeleteMapping("/me/ai-consent") public Object revokeConsent(Principal p) {return consentService.revoke(p.getName());}
     @GetMapping("/foods") public Object foods(@RequestParam String query) {return foods.search(query);}
     @GetMapping("/meals") public Object list(Principal p) {return meals.list(p.getName());}
     @GetMapping("/meals/{id}") public Object meal(Principal p,@PathVariable String id) {return meals.get(p.getName(),id);}
     @PostMapping(value="/meals",consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Object create(Principal p,@RequestHeader("Idempotency-Key") String key,@RequestParam long eatenAt,@RequestParam(defaultValue="{}") String captureInfo,@RequestParam boolean consent,@RequestPart("images") List<MultipartFile> images) throws Exception {
-        if(!consent) throw ApiError.bad("CONSENT_REQUIRED");
+    public Object create(Principal p,@RequestHeader("Idempotency-Key") String key,@RequestParam long eatenAt,@RequestParam(defaultValue="{}") String captureInfo,@RequestPart("images") List<MultipartFile> images) throws Exception {
+        AiConsent.require(db,p.getName());
         if(key.isBlank()||key.length()>100||images.isEmpty()||images.size()>3||eatenAt<=0||eatenAt>System.currentTimeMillis()+86400000) throw ApiError.bad("INVALID_UPLOAD");
         if(captureInfo.length()>10000 || !json.read(captureInfo).isObject()) throw ApiError.bad("INVALID_CAPTURE");
+        captureInfo = json.write(com.example.foodify.ai.CaptureEvidence.normalize(json.read(captureInfo),images.size()));
         var saved=new ArrayList<String>();
         try {
             for(var file:images) saved.add(photos.save(file));
@@ -52,7 +60,7 @@ public class AppController {
         return meals.update(p.getName(),id,body.get("version").asLong(),body.path("items"));
     }
     @DeleteMapping("/meals/{id}") public void delete(Principal p,@PathVariable String id) {meals.delete(p.getName(),id);}
-    @PostMapping("/meals/{id}/analyses") public Object retry(Principal p,@PathVariable String id) {return meals.retry(p.getName(),id);}
+    @PostMapping("/meals/{id}/analyses") public Object retry(Principal p,@PathVariable String id) {AiConsent.require(db,p.getName());return meals.retry(p.getName(),id);}
     @GetMapping("/analyses/{id}") public Object analysis(Principal p,@PathVariable String id) {
         var rows=db.queryForList("SELECT a.* FROM analyses a JOIN meals m ON m.id=a.meal_id WHERE a.id=? AND m.member_id=?",id,p.getName());if(rows.isEmpty()) throw ApiError.missing();return rows.getFirst();
     }
@@ -70,6 +78,7 @@ public class AppController {
         return json.write(Map.of("summary",meals.summary(member,from,to),"revisions",revisions,"goals",goals));
     }
     @PostMapping("/feedback") public Object feedback(Principal p,@RequestBody JsonNode body) {
+        AiConsent.require(db,p.getName());
         LocalDate from=LocalDate.parse(body.path("from").asText()),to=LocalDate.parse(body.path("to").asText());
         String evidence=evidence(p.getName(),from,to),id=UUID.randomUUID().toString();
         var content=ai.feedback(evidence);

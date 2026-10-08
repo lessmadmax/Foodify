@@ -27,10 +27,12 @@ class WorkflowTest {
     @Autowired AuthService auth; @Autowired Json json; @Autowired PhotoStore photos;
     @Autowired FoodService foods; @Autowired TransactionTemplate tx; @Autowired OpenAiClient ai;
     @Autowired com.example.foodify.meal.MealService meals;
+    @Autowired AiConsent consentService;
     String token,other;
     @BeforeEach void setup() {
         token=(String)auth.signup(UUID.randomUUID()+"@example.com","safe-password-123").get("accessToken");
         other=(String)auth.signup(UUID.randomUUID()+"@example.com","safe-password-123").get("accessToken");
+        consentService.accept(auth.member(token),AiConsent.VERSION);
         if(db.queryForObject("SELECT COUNT(*) FROM foods WHERE id='test-food'",Integer.class)==0)
             db.update("INSERT INTO foods(id,name,aliases,basis_grams,kcal,carbs,protein,fat,source,source_version) VALUES('test-food','시험 음식','',100,200,30,10,5,'TEST FIXTURE ONLY','test-v1')");
     }
@@ -47,6 +49,41 @@ class WorkflowTest {
         mvc.perform(get("/api/v1/meals/"+first.path("id").asText()).header("Authorization","Bearer "+other)).andExpect(status().isNotFound());
         mvc.perform(get("/api/v1/photos/"+first.path("photos").get(0).path("id").asText()).header("Authorization","Bearer "+other)).andExpect(status().isNotFound());
     }
+    @Test void consentIsMemberScopedVersionedAndRevocable() throws Exception {
+        mvc.perform(get("/api/v1/me/ai-consent").header("Authorization","Bearer "+other))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.accepted").value(false));
+        mvc.perform(put("/api/v1/me/ai-consent").header("Authorization","Bearer "+other).contentType("application/json").content("{\"version\":\"old\",\"accepted\":true}"))
+            .andExpect(status().isConflict());
+        mvc.perform(put("/api/v1/me/ai-consent").header("Authorization","Bearer "+other).contentType("application/json").content("{\"version\":\""+AiConsent.VERSION+"\",\"accepted\":true}"))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.accepted").value(true)).andExpect(jsonPath("$.acceptedAt").isNumber());
+        var first=consentService.get(auth.member(other));
+        assertEquals(first.get("acceptedAt"),consentService.accept(auth.member(other),AiConsent.VERSION).get("acceptedAt"));
+        mvc.perform(delete("/api/v1/me/ai-consent").header("Authorization","Bearer "+other))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.accepted").value(false)).andExpect(jsonPath("$.revokedAt").isNumber());
+        assertEquals(true,consentService.get(auth.member(token)).get("accepted"));
+        assertThrows(ApiError.class,()->AiConsent.require(db,auth.member(other)));
+        assertEquals(true,consentService.accept(auth.member(other),AiConsent.VERSION).get("accepted"));
+        db.update("UPDATE members SET ai_consent_version='old' WHERE id=?",auth.member(other));
+        assertThrows(ApiError.class,()->AiConsent.require(db,auth.member(other)));
+    }
+    @Test void revokedConsentBlocksUploadRetryFeedbackAndQueuedWorker() throws Exception {
+        db.update("UPDATE analyses SET status='SUPERSEDED' WHERE status='QUEUED'");
+        var meal=upload(UUID.randomUUID().toString());
+        consentService.revoke(auth.member(token));
+        mvc.perform(multipart("/api/v1/meals").file(new MockMultipartFile("images","x.jpg","image/jpeg",new byte[]{1}))
+            .param("eatenAt",Long.toString(System.currentTimeMillis())).param("consent","true")
+            .header("Idempotency-Key","blocked").header("Authorization","Bearer "+token))
+            .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("AI_CONSENT_REQUIRED"));
+        mvc.perform(post("/api/v1/meals/"+meal.path("id").asText()+"/analyses").header("Authorization","Bearer "+token))
+            .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("AI_CONSENT_REQUIRED"));
+        mvc.perform(post("/api/v1/feedback").header("Authorization","Bearer "+token).contentType("application/json").content("{}"))
+            .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("AI_CONSENT_REQUIRED"));
+        var fake=org.mockito.Mockito.mock(OpenAiClient.class);
+        new AnalysisWorker(db,tx,fake,photos,json,foods).tick();
+        org.mockito.Mockito.verifyNoInteractions(fake);
+        assertEquals("INCOMPLETE",meals.get(auth.member(token),meal.path("id").asText()).get("status"));
+        assertEquals("AI_CONSENT_REQUIRED",db.queryForObject("SELECT error_code FROM analyses WHERE meal_id=?",String.class,meal.path("id").asText()));
+    }
     @Test void autoGoalsArePreviewedAndSavedForOwnerOnly() throws Exception {
         String profile="{\"age\":30,\"sex\":\"MALE\",\"heightCm\":180,\"weightKg\":80,\"activityLevel\":\"SEDENTARY\",\"generalAdultConfirmed\":true,\"kcal\":1,\"purpose\":\"ignored\"}";
         mvc.perform(post("/api/v1/me/goals/preview").header("Authorization","Bearer "+token).contentType("application/json").content(profile))
@@ -58,19 +95,24 @@ class WorkflowTest {
         mvc.perform(get("/api/v1/me").header("Authorization","Bearer "+other)).andExpect(jsonPath("$.goals.kcal").doesNotExist());
         mvc.perform(post("/api/v1/me/goals/preview").contentType("application/json").content(profile)).andExpect(status().isUnauthorized());
     }
-    @Test void analysisPreviewHasNutritionButRemainsUnconfirmed() throws Exception {
+    @Test void analysisCompletesAutomaticallyWithNutritionEvidence() throws Exception {
         db.update("UPDATE analyses SET status='SUPERSEDED' WHERE status='QUEUED'");
         JsonNode meal=upload(UUID.randomUUID().toString());
         var fake=org.mockito.Mockito.mock(OpenAiClient.class);
-        org.mockito.Mockito.when(fake.analyze(org.mockito.ArgumentMatchers.anyList())).thenReturn(json.read("{\"items\":[{\"name\":\"시험 음식\",\"grams\":150,\"ingredients\":[],\"uncertainty\":\"사진 추정\"}]}"));
+        org.mockito.Mockito.when(fake.analyze(org.mockito.ArgumentMatchers.anyList(),org.mockito.ArgumentMatchers.anyMap())).thenReturn(json.read("{\"items\":[{\"name\":\"시험 음식\",\"grams\":150,\"weightEstimate\":{\"lowerGrams\":100,\"upperGrams\":200,\"assumptions\":[\"보통 크기\"]},\"ingredients\":[],\"uncertainty\":\"사진 추정\"}]}"));
         org.mockito.Mockito.when(fake.chooseCandidates(org.mockito.ArgumentMatchers.any())).thenReturn(json.read("{\"selections\":[{\"index\":0,\"foodId\":\"test-food\"}]}"));
         new AnalysisWorker(db,tx,fake,photos,json,foods).tick();
         var result=meals.get(auth.member(token),meal.path("id").asText());
         var item=((JsonNode)result.get("items")).get(0);
         assertEquals(300,item.path("nutrition").path("kcal").asInt());
         assertFalse(item.path("confirmed").asBoolean());
-        assertEquals("INCOMPLETE",result.get("status"));
+        assertEquals("COMPLETE",result.get("status"));
         assertEquals(false,result.get("analysisEnabled"));
+        assertEquals(100,item.path("weightEstimate").path("lowerGrams").asInt());
+        var saved=meals.update(auth.member(token),meal.path("id").asText(),((Number)result.get("version")).longValue(),json.read("[{\"name\":\"시험 음식\",\"foodId\":\"test-food\",\"grams\":150}]"));
+        assertTrue(((JsonNode)saved.get("items")).get(0).has("weightEstimate"));
+        var edited=meals.update(auth.member(token),meal.path("id").asText(),((Number)saved.get("version")).longValue(),json.read("[{\"name\":\"시험 음식\",\"foodId\":\"test-food\",\"grams\":170}]"));
+        assertFalse(((JsonNode)edited.get("items")).get(0).has("weightEstimate"));
     }
     @Test void correctionRecalculatesAndProtectsVersion() throws Exception {
         JsonNode meal=upload(UUID.randomUUID().toString());String id=meal.path("id").asText();
@@ -108,7 +150,7 @@ class WorkflowTest {
         db.update("UPDATE analyses SET status='SUPERSEDED' WHERE status='QUEUED'");
         JsonNode meal=upload(UUID.randomUUID().toString());String id=meal.path("id").asText();
         var fake=org.mockito.Mockito.mock(OpenAiClient.class);
-        org.mockito.Mockito.when(fake.analyze(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation->{
+        org.mockito.Mockito.when(fake.analyze(org.mockito.ArgumentMatchers.anyList(),org.mockito.ArgumentMatchers.anyMap())).thenAnswer(invocation->{
             meals.update(auth.member(token),id,0,json.read("[{\"name\":\"사용자 수정\",\"foodId\":\"test-food\",\"grams\":100,\"confirmed\":true}]"));
             return json.read("{\"items\":[{\"name\":\"다른 음식\",\"grams\":100,\"ingredients\":[],\"uncertainty\":\"\"}]}");
         });

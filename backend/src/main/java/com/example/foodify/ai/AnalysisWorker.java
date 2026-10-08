@@ -28,25 +28,33 @@ public class AnalysisWorker {
         if(db.update("UPDATE analyses SET status='RUNNING',attempts=attempts+1,updated_at=? WHERE id=? AND status='QUEUED'",System.currentTimeMillis(),id)!=1) return;
         db.update("UPDATE meals SET status='RUNNING' WHERE id=? AND version=?",meal,version);
         try {
+            String member=db.queryForObject("SELECT member_id FROM meals WHERE id=?",String.class,meal);
+            AiConsent.require(db,member);
             var bytes=new ArrayList<byte[]>();
             for(String key:db.queryForList("SELECT storage_key FROM photos WHERE meal_id=?",String.class,meal)) bytes.add(photos.read(key));
-            var result=ai.analyze(bytes);
+            var capture=json.read(db.queryForObject("SELECT capture_info FROM meals WHERE id=?",String.class,meal));
+            AiConsent.require(db,member);
+            var result=ai.analyze(bytes, CaptureEvidence.normalize(capture,bytes.size()));
             var items=new ArrayList<Map<String,Object>>();
             for(var item:result.path("items")) {
                 var output=new LinkedHashMap<String,Object>();
                 output.put("name",item.path("name").asText());output.put("grams",item.get("grams"));
+                if(item.path("weightEstimate").isObject()) output.put("weightEstimate",item.get("weightEstimate"));
                 output.put("foodId","");output.put("confirmed",false);output.put("nutrition",null);output.put("status","NEEDS_REVIEW");
                 output.put("ingredients",item.get("ingredients"));output.put("uncertainty",item.path("uncertainty").asText());
                 output.put("candidates",foods.search(item.path("name").asText()));items.add(output);
             }
+            AiConsent.require(db,member);
             suggestMatches(items);
-            // Preview nutrients while preserving the user's confirmation step.
+            // Complete automatically when each food has valid weight and nutrition evidence.
             for(var item:items) {
                 var calculated=foods.calculate(json.read(json.write(item)));
                 item.put("nutrition",calculated.get("nutrition"));
                 item.put("source",calculated.get("source"));
+                item.put("status",calculated.get("status"));
             }
-            finish(id,meal,version,json.write(items),"USER_REVIEW_REQUIRED");
+            boolean complete=!items.isEmpty() && items.stream().allMatch(i->"COMPLETE".equals(i.get("status")));
+            finish(id,meal,version,json.write(items),complete?null:"USER_REVIEW_REQUIRED");
         } catch(Exception e) {
             String error=e instanceof ApiError ae?ae.code:"ANALYSIS_FAILED";
             boolean temporary=error.equals("OPENAI_UNAVAILABLE")||error.equals("OPENAI_HTTP_429")||error.startsWith("OPENAI_HTTP_5");
@@ -80,9 +88,10 @@ public class AnalysisWorker {
             if(((Number)rows.getFirst().get("version")).longValue()!=version) {
                 db.update("UPDATE analyses SET status='SUPERSEDED',updated_at=? WHERE id=?",System.currentTimeMillis(),id);return;
             }
-            if(items!=null) db.update("UPDATE meals SET items=?,status='INCOMPLETE',version=version+1 WHERE id=?",items,meal);
+            String status=items!=null && error==null?"COMPLETE":"INCOMPLETE";
+            if(items!=null) db.update("UPDATE meals SET items=?,status=?,version=version+1 WHERE id=?",items,status,meal);
             else db.update("UPDATE meals SET status='INCOMPLETE',version=version+1 WHERE id=?",meal);
-            db.update("UPDATE analyses SET status='INCOMPLETE',error_code=?,updated_at=? WHERE id=?",error,System.currentTimeMillis(),id);
+            db.update("UPDATE analyses SET status=?,error_code=?,updated_at=? WHERE id=?",status,error,System.currentTimeMillis(),id);
         });
     }
     private void cleanPhotos() {

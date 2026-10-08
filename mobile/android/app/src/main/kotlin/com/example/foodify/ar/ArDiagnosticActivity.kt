@@ -50,6 +50,9 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
     private var lastNewDepthTime = 0L
     private var recording: CaptureRun? = null // GL thread only
     private var lastSavedDirectory: String? = null
+    private var savingCapture = false
+    private val mealCapture get() = intent.getBooleanExtra("mealCapture", false)
+    private var plainCamera = false
 
     private class CaptureRun(val directory: File, val deadline: Long) {
         var count = 0
@@ -68,8 +71,8 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
             setPadding(12, 12, 12, 12)
             fitsSystemWindows = true
         }
-        root.addView(text("Foodify · AR 깊이 진단", 19f))
-        root.addView(text("약 0.5m부터 시작해 밝은 곳에서 천천히 옆으로 이동하세요. 음식량 측정 전 실험 화면입니다.", 13f))
+        root.addView(text(if(mealCapture) "Foodify · 음식 촬영" else "Foodify · AR 깊이 진단", 19f))
+        root.addView(text(if(mealCapture) "음식 전체를 비추고 촬영을 누른 뒤 5초 동안 천천히 옆으로 움직여 주세요." else "약 0.5m부터 시작해 밝은 곳에서 천천히 옆으로 이동하세요. 음식량 측정 전 실험 화면입니다.", 13f))
         status = text("카메라·AR 서비스 확인 중", 14f)
         root.addView(status)
         val cameraBox = FrameLayout(this)
@@ -84,6 +87,7 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
         root.addView(cameraBox, LinearLayout.LayoutParams(-1, 0, 1f))
         metrics = text("깊이 수집 대기", 13f)
         root.addView(metrics)
+        if (mealCapture) metrics.visibility = View.GONE
         val maps = LinearLayout(this)
         fun mapColumn(title: String): ImageView {
             val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -95,12 +99,16 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
         }
         depthView = mapColumn("원본 깊이: 빨강 0.2m → 파랑 2m")
         confidenceView = mapColumn("원본 신뢰도: 검정 0 → 흰색 255")
-        root.addView(maps)
-        root.addView(text("지도는 센서 방향입니다. 검정 깊이=미확보. 신뢰도는 오차율이 아닙니다.", 11f))
+        if (!mealCapture) {
+            root.addView(maps)
+            root.addView(text("지도는 센서 방향입니다. 검정 깊이=미확보. 신뢰도는 오차율이 아닙니다.", 11f))
+        }
         recordButton = Button(this).apply {
-            text = "5초 진단 데이터 저장"
+            text = if(mealCapture) "사진 촬영 · 5초" else "5초 진단 데이터 저장"
             isEnabled = false
             setOnClickListener {
+                savingCapture = true
+                lastSavedDirectory = null
                 isEnabled = false
                 text = "천천히 이동하세요 · 수집 중"
                 surface.queueEvent {
@@ -110,8 +118,12 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
             }
         }
         root.addView(recordButton)
-        root.addView(text("사진·깊이는 앱 내부에만 저장됩니다. 서버·OpenAI 전송 없음.", 11f))
+        root.addView(text(if(mealCapture) "촬영 완료 후 대표 사진과 거리 정보를 자동으로 첨부합니다. 다음 화면에서 동의 후 분석합니다." else "사진·깊이는 앱 내부에만 저장됩니다. 서버·OpenAI 전송 없음.", 11f))
         val buttons = LinearLayout(this)
+        if (mealCapture) buttons.addView(Button(this).apply {
+            text = "일반 사진으로 촬영"
+            setOnClickListener { if (!savingCapture) { plainCamera = true; finish() } }
+        }, LinearLayout.LayoutParams(0, -2, 1f))
         buttons.addView(Button(this).apply {
             text = "권한 설정"
             setOnClickListener { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
@@ -202,7 +214,11 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
     }
 
     override fun finish() {
-        setResult(RESULT_OK, Intent().putExtra("directory", lastSavedDirectory))
+        if (savingCapture) {
+            Toast.makeText(this, "데이터 저장 완료 후 돌아가 주세요.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        setResult(RESULT_OK, Intent().putExtra("directory", lastSavedDirectory).putExtra("fallback", plainCamera))
         super.finish()
     }
 
@@ -406,13 +422,15 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
             } catch(e: Exception) { run.failure = e.javaClass.simpleName }
             runOnUiThread {
                 if(!isDestroyed) {
+                    savingCapture = false
                     lastSavedDirectory = run.directory.name
-                    recordButton.text = "5초 진단 데이터 저장"
+                    recordButton.text = if(mealCapture) "다시 촬영 · 5초" else "5초 진단 데이터 저장"
                     recordButton.isEnabled = resumed && run.failure == null
                     Toast.makeText(this,
                         if(run.failure != null) "저장 오류: ${run.failure}"
                         else if(run.saved == 0) "새 깊이를 확보하지 못했습니다. 밝은 곳에서 다시 촬영하세요."
                         else "진단 ${run.saved}프레임 저장 완료", Toast.LENGTH_LONG).show()
+                    if (mealCapture && resumed) finish()
                 }
             }
         }

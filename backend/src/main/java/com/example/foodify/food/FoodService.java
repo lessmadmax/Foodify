@@ -12,8 +12,21 @@ public class FoodService {
     public FoodService(JdbcTemplate db) { this.db=db; }
     public List<Map<String,Object>> search(String query) {
         if(query==null || query.isBlank() || query.length()>100) return List.of();
-        String term=query.trim().replace("!","!!").replace("%","!%").replace("_","!_");
-        return db.queryForList("SELECT * FROM foods WHERE searchable=TRUE AND basis_unit='g' AND (name LIKE ? ESCAPE '!' OR aliases LIKE ? ESCAPE '!' OR id IN (SELECT food_id FROM food_aliases WHERE alias LIKE ? ESCAPE '!')) ORDER BY CASE WHEN name=? THEN 0 ELSE 1 END, CASE WHEN category='음식' THEN 0 ELSE 1 END, CASE WHEN kcal IS NOT NULL AND carbs IS NOT NULL AND protein IS NOT NULL AND fat IS NOT NULL THEN 0 ELSE 1 END, name LIMIT 20","%"+term+"%","%"+term+"%","%"+term+"%",query.trim());
+        var terms=FoodSearchTerms.stages(query);
+        for(int stage=0;stage<terms.size();stage++) {
+            String term=terms.get(stage).replace("!","!!").replace("%","!%").replace("_","!_");
+            String name=normalizedColumn("name"), aliases=normalizedColumn("aliases"), alias=normalizedColumn("alias");
+            var rows=db.queryForList("SELECT * FROM foods WHERE searchable=TRUE AND basis_unit='g' AND ("+name+" LIKE ? ESCAPE '!' OR "+aliases+" LIKE ? ESCAPE '!' OR id IN (SELECT food_id FROM food_aliases WHERE "+alias+" LIKE ? ESCAPE '!')) ORDER BY CASE WHEN "+name+"=? THEN 0 ELSE 1 END, CASE WHEN category='음식' THEN 0 ELSE 1 END, CASE WHEN kcal IS NOT NULL AND carbs IS NOT NULL AND protein IS NOT NULL AND fat IS NOT NULL THEN 0 ELSE 1 END, name LIMIT 20","%"+term+"%","%"+term+"%","%"+term+"%",terms.get(stage));
+            if(!rows.isEmpty()) {
+                for(var row:rows) { row.put("searchTerm",terms.get(stage)); row.put("searchFallback",stage>0); }
+                return rows;
+            }
+        }
+        return List.of();
+    }
+    private static String normalizedColumn(String column) {
+        // Column names are internal constants; user terms remain SQL parameters.
+        return "LOWER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE("+column+",' ',''),'_',''),'-',''),CHAR(9),''),'　',''))";
     }
     public Map<String,Object> calculate(JsonNode input) {
         String name=input.path("name").asText("").trim();
@@ -21,7 +34,7 @@ public class FoodService {
         var result=new LinkedHashMap<String,Object>();
         result.put("name",name); result.put("foodId",input.path("foodId").asText(""));
         result.put("grams",null); result.put("nutrition",null); result.put("source",null);
-        result.put("confirmed",input.path("confirmed").asBoolean(false));
+        // Completion depends on calculation evidence, not a user confirmation flag.
         result.put("status","NEEDS_REVIEW");
         if(!input.path("grams").isNumber()) return result;
         BigDecimal grams=input.get("grams").decimalValue();
@@ -37,7 +50,7 @@ public class FoodService {
             nutrients.put(nutrient,scale((BigDecimal)food.get(nutrient),grams,(BigDecimal)food.get("basis_grams")));
         }
         result.put("nutrition",nutrients);
-        if(input.path("confirmed").asBoolean(false)) result.put("status","COMPLETE");
+        result.put("status","COMPLETE");
         return result;
     }
     public static BigDecimal scale(BigDecimal value,BigDecimal grams,BigDecimal basis) {

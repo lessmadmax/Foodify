@@ -90,16 +90,19 @@ class Api {
     }
   }
 
-  Future<dynamic> upload(List<String> paths, String key, int eatenAt) async {
+  Future<dynamic> upload(
+    List<String> paths,
+    String key,
+    int eatenAt, {
+    Map<String, dynamic>? captureInfo,
+  }) async {
     // Refresh before constructing one-shot multipart bodies; retry remains explicit and idempotent.
     await request('GET', '/me');
     final form = FormData.fromMap({
       'eatenAt': eatenAt,
-      'consent': true,
-      'captureInfo': jsonEncode({
-        'method': 'guided_photos',
-        'arValidated': false,
-      }),
+      'captureInfo': jsonEncode(
+        captureInfo ?? {'method': 'guided_photos', 'arValidated': false},
+      ),
       'images': [for (final p in paths) await MultipartFile.fromFile(p)],
     });
     return (await dio.post(
@@ -122,6 +125,12 @@ String errorText(Object e) {
     final body = e.response?.data;
     final code = body is Map ? body['code'] : null;
     return switch (code) {
+      'CHAT_BUSY' => '이전 답변을 처리 중입니다. 잠시 후 대화를 새로고침해 주세요.',
+      'CHAT_FAILED' || 'CHAT_INTERRUPTED' => '답변을 완료하지 못했습니다. 다시 시도해 주세요.',
+      'INVALID_CHAT_MESSAGE' => '질문을 1~2,000자로 입력해 주세요.',
+      'CHAT_REQUEST_MISMATCH' => '다른 내용으로 재전송되었습니다. 질문을 새로 입력해 주세요.',
+      'AI_CONSENT_REQUIRED' => 'AI 전송 안내 확인과 동의가 필요합니다. 다시 요청해 주세요.',
+      'AI_CONSENT_VERSION_CHANGED' => '안내가 변경되었습니다. 최신 안내를 불러와 확인해 주세요.',
       'OPENAI_NOT_CONFIGURED' => '서버에 OpenAI API 키 설정이 필요합니다.',
       'INVALID_PROFILE' => '나이·성별·키(100~250cm)·몸무게(25~350kg)·활동량을 확인해 주세요.',
       'GOAL_SCOPE_CONFIRMATION_REQUIRED' =>

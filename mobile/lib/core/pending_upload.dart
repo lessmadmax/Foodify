@@ -7,13 +7,27 @@ class PendingUpload {
   final String key, member;
   final int eatenAt;
   final List<String> paths;
-  PendingUpload(this.key, this.member, this.eatenAt, this.paths);
+  final Map<String, dynamic> captureInfo;
+  PendingUpload(
+    this.key,
+    this.member,
+    this.eatenAt,
+    this.paths, [
+    this.captureInfo = const {
+      'method': 'guided_photos',
+      'volumeValidated': false,
+    },
+  ]);
   static Future<Directory> _directory() async {
     final root = await getApplicationDocumentsDirectory();
     return Directory('${root.path}/pending').create(recursive: true);
   }
 
-  static Future<PendingUpload> save(String member, List<String> sources) async {
+  static Future<PendingUpload> save(
+    String member,
+    List<String> sources, {
+    Map<String, dynamic>? captureInfo,
+  }) async {
     final dir = await _directory();
     final key = const Uuid().v4();
     final paths = <String>[];
@@ -25,6 +39,8 @@ class PendingUpload {
       member,
       DateTime.now().millisecondsSinceEpoch,
       paths,
+      captureInfo ??
+          const {'method': 'guided_photos', 'volumeValidated': false},
     );
     await File('${dir.path}/$key.json').writeAsString(
       jsonEncode({
@@ -32,6 +48,7 @@ class PendingUpload {
         'member': member,
         'eatenAt': upload.eatenAt,
         'paths': paths,
+        'captureInfo': upload.captureInfo,
       }),
     );
     return upload;
@@ -50,6 +67,10 @@ class PendingUpload {
             member,
             data['eatenAt'],
             List<String>.from(data['paths']),
+            Map<String, dynamic>.from(
+              data['captureInfo'] ??
+                  {'method': 'guided_photos', 'volumeValidated': false},
+            ),
           ),
         );
       }

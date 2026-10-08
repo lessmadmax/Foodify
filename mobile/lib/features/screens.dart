@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +9,9 @@ import '../core/api.dart';
 import '../core/pending_upload.dart';
 import '../core/ar_capabilities.dart';
 import '../core/meal_review.dart';
+import 'nutrition_table.dart';
+import 'ai_consent.dart';
+import 'chat_screen.dart';
 
 String date(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
@@ -28,7 +32,9 @@ Widget body(List<Widget> children) => Center(
 Widget gap() => const SizedBox(height: 16);
 
 String analysisHint(dynamic code) => switch (code) {
-  'USER_REVIEW_REQUIRED' => '참고 추정치가 준비됐습니다. 음식·중량·DB 항목 확인 후 저장하면 합계에 반영됩니다.',
+  'AI_CONSENT_REQUIRED' =>
+    'AI 전송 동의를 확인해 주세요. AI 분석 다시 요청을 누르면 안내를 확인할 수 있습니다.',
+  'USER_REVIEW_REQUIRED' => '일부 음식의 중량 또는 영양정보 확인이 필요합니다. 아래에서 수정할 수 있습니다.',
   'OPENAI_NOT_CONFIGURED' => '서버 API 키 설정이 필요합니다.',
   'OPENAI_HTTP_401' => '서버의 API 인증 설정을 확인해 주세요.',
   'OPENAI_HTTP_429' => 'AI 요청 한도 또는 결제 잔액을 확인해 주세요.',
@@ -306,13 +312,8 @@ class _GoalsState extends ConsumerState<GoalsScreen> {
       ),
       if (estimate != null) ...[
         gap(),
-        Text(
-          '하루 참고 목표: ${estimate!['kcal']} kcal',
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
-        Text(
-          '탄수화물 ${estimate!['carbs']} g · 단백질 ${estimate!['protein']} g · 지방 ${estimate!['fat']} g',
-        ),
+        Text('하루 참고 목표', style: Theme.of(context).textTheme.titleLarge),
+        NutritionTable(values: estimate!),
         const Text(
           'Mifflin–St Jeor 안정 시 대사량 × 활동 계수. 탄·단·지 열량 배분 50:20:30은 앱 기본값이며, 개인별 처방값이 아닙니다.',
         ),
@@ -340,7 +341,6 @@ class _HomeState extends ConsumerState<HomeScreen> {
   List<dynamic> meals = [];
   List<PendingUpload> pending = [];
   Map<String, dynamic>? summary;
-  dynamic feedback;
   String? error;
   bool busy = false;
   int days = 1;
@@ -367,7 +367,6 @@ class _HomeState extends ConsumerState<HomeScreen> {
           summary = Map<String, dynamic>.from(totals);
           pending = uploads;
           error = null;
-          feedback = null;
         });
       }
     } catch (e) {
@@ -431,7 +430,11 @@ class _HomeState extends ConsumerState<HomeScreen> {
         ),
         PopupMenuButton<String>(
           onSelected: (v) {
-            if (v == 'delete') {
+            if (v == 'settings') {
+              Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const SettingsScreen()));
+            } else if (v == 'delete') {
               deleteAccount();
             } else {
               run(() async {
@@ -441,6 +444,7 @@ class _HomeState extends ConsumerState<HomeScreen> {
             }
           },
           itemBuilder: (_) => const [
+            PopupMenuItem(value: 'settings', child: Text('설정')),
             PopupMenuItem(value: 'logout', child: Text('로그아웃')),
             PopupMenuItem(value: 'delete', child: Text('계정 삭제')),
           ],
@@ -475,13 +479,9 @@ class _HomeState extends ConsumerState<HomeScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    '${summary!['totals']['kcal']} kcal',
-                    style: Theme.of(context).textTheme.headlineMedium,
-                  ),
-                  Text(
-                    '탄수화물 ${summary!['totals']['carbs']}g · 단백질 ${summary!['totals']['protein']}g · 지방 ${summary!['totals']['fat']}g',
-                  ),
+                  Text('영양 합계', style: Theme.of(context).textTheme.titleLarge),
+                  gap(),
+                  NutritionTable(values: summary!['totals']),
                   Text(
                     '완료 ${summary!['completedMeals']}건 · 미완료 ${summary!['incompleteMeals']}건',
                   ),
@@ -494,31 +494,11 @@ class _HomeState extends ConsumerState<HomeScreen> {
         FilledButton.tonal(
           onPressed: busy
               ? null
-              : () => run(() async {
-                  final now = DateTime.now();
-                  final result = await ref
-                      .read(apiProvider)
-                      .request(
-                        'POST',
-                        '/feedback',
-                        data: {
-                          'from': date(now.subtract(Duration(days: days - 1))),
-                          'to': date(now),
-                        },
-                      );
-                  if (mounted) setState(() => feedback = result['content']);
-                }),
-          child: const Text('내 식단 피드백 요청'),
+              : () => Navigator.of(
+                  context,
+                ).push(MaterialPageRoute(builder: (_) => const ChatScreen())),
+          child: const Text('식단 피드백 챗봇'),
         ),
-        if (feedback != null)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                '${feedback['summary']}\n\n${(feedback['suggestions'] as List).join('\n')}',
-              ),
-            ),
-          ),
         for (final p in pending)
           ListTile(
             title: const Text('전송 대기 중인 촬영'),
@@ -527,9 +507,20 @@ class _HomeState extends ConsumerState<HomeScreen> {
               onPressed: busy
                   ? null
                   : () => run(() async {
+                      if (!await ensureAiConsent(
+                        context,
+                        ref.read(apiProvider),
+                      )) {
+                        return;
+                      }
                       await ref
                           .read(apiProvider)
-                          .upload(p.paths, p.key, p.eatenAt);
+                          .upload(
+                            p.paths,
+                            p.key,
+                            p.eatenAt,
+                            captureInfo: p.captureInfo,
+                          );
                       await p.remove();
                       await load();
                     }),
@@ -549,7 +540,7 @@ class _HomeState extends ConsumerState<HomeScreen> {
               title: Text(
                 (m['items'] as List).isEmpty
                     ? '분석할 식단'
-                    : (m['items'] as List).map((i) => i['name']).join(', '),
+                    : '식단 기록 · 음식 ${(m['items'] as List).length}개',
               ),
               subtitle: Text(
                 '${date(DateTime.fromMillisecondsSinceEpoch(m['eaten_at']))} · ${stateLabel(m['status'])}',
@@ -563,6 +554,66 @@ class _HomeState extends ConsumerState<HomeScreen> {
   );
 }
 
+class SettingsScreen extends StatelessWidget {
+  const SettingsScreen({super.key});
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('설정')),
+    body: ListView(
+      children: [
+        ListTile(
+          leading: const Icon(Icons.privacy_tip_outlined),
+          title: const Text('AI 전송 안내 및 동의'),
+          subtitle: const Text('안내 내용·동의 내역 확인 및 철회'),
+          onTap: () => Navigator.of(
+            context,
+          ).push(MaterialPageRoute(builder: (_) => const AiConsentScreen())),
+        ),
+        ExpansionTile(
+          title: const Text('개발자 메뉴'),
+          leading: const Icon(Icons.developer_mode),
+          children: [
+            ListTile(
+              title: const Text('AR 지원 확인'),
+              onTap: () async {
+                final result = await ArCapabilities.check();
+                if (context.mounted) {
+                  showDialog<void>(
+                    context: context,
+                    builder: (c) => AlertDialog(
+                      title: const Text('AR 지원 정보'),
+                      content: Text(
+                        '${result['device'] ?? ''}\nARCore: ${result['arCore']}\n깊이: ${result['depth'] ?? '확인 필요'}',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(c),
+                          child: const Text('닫기'),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+              },
+            ),
+            ListTile(
+              title: const Text('AR 깊이 진단 · 실험'),
+              subtitle: const Text('개발용 깊이·신뢰도 확인 및 로컬 데이터 저장'),
+              onTap: () async {
+                try {
+                  await ArCapabilities.openDiagnostics();
+                } catch (e) {
+                  if (context.mounted) notify(context, e);
+                }
+              },
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+}
+
 class CaptureScreen extends ConsumerStatefulWidget {
   const CaptureScreen({super.key});
   @override
@@ -571,20 +622,81 @@ class CaptureScreen extends ConsumerStatefulWidget {
 
 class _CaptureState extends ConsumerState<CaptureScreen> {
   final paths = <String>[];
-  bool consent = false, busy = false;
+  bool busy = false;
   PendingUpload? saved;
   String? arInfo;
-  Future<void> capture() async {
+  Map<String, dynamic> captureInfo = {
+    'method': 'guided_photos',
+    'volumeValidated': false,
+  };
+  Future<void> capture([ImageSource source = ImageSource.camera]) async {
+    setState(() => busy = true);
     try {
       final image = await ImagePicker().pickImage(
-        source: ImageSource.camera,
+        source: source,
         maxWidth: 1600,
         imageQuality: 85,
         requestFullMetadata: false,
       );
-      if (image != null && mounted) setState(() => paths.add(image.path));
+      if (image != null && mounted) {
+        setState(() {
+          paths.add(image.path);
+          if (source == ImageSource.gallery) {
+            captureInfo['method'] = 'gallery_photos';
+          }
+        });
+      }
     } catch (e) {
       if (mounted) notify(context, e);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> capturePhoto() async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      if (paths.isEmpty) {
+        final support = await ArCapabilities.check();
+        if (!mounted) return;
+        if (support['depth'] != false &&
+            support['arCore'] != 'UNAVAILABLE' &&
+            support['arCore'] != 'UNSUPPORTED_DEVICE_NOT_CAPABLE') {
+          final fallback = await captureAr();
+          if (!mounted || !fallback) return;
+        }
+      }
+      if (mounted) {
+        notify(context, '사진 기반 추정으로 촬영합니다.');
+        await capture();
+      }
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<bool> captureAr() async {
+    setState(() => busy = true);
+    try {
+      final result = await ArCapabilities.captureMeal();
+      if (result?['fallback'] == true) return true;
+      if (result != null && mounted) {
+        final info = Map<String, dynamic>.from(
+          jsonDecode(result['captureInfo'] as String),
+        );
+        setState(() {
+          paths.add(result['path'] as String);
+          captureInfo = info;
+          arInfo = '거리 정보를 함께 확보했습니다. 중량은 AI 참고 추정값입니다.';
+        });
+      }
+      return false;
+    } catch (e) {
+      if (mounted) notify(context, e);
+      return true;
+    } finally {
+      if (mounted) setState(() => busy = false);
     }
   }
 
@@ -592,11 +704,18 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
     setState(() => busy = true);
     try {
       final api = ref.read(apiProvider);
+      if (!await ensureAiConsent(context, api)) return;
       saved ??= await PendingUpload.save(
         (await api.storage.read(key: 'member'))!,
         paths,
+        captureInfo: captureInfo,
       );
-      final result = await api.upload(saved!.paths, saved!.key, saved!.eatenAt);
+      final result = await api.upload(
+        saved!.paths,
+        saved!.key,
+        saved!.eatenAt,
+        captureInfo: saved!.captureInfo,
+      );
       await saved!.remove();
       if (mounted) context.go('/meal/${result['id']}');
     } catch (e) {
@@ -611,12 +730,12 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
     appBar: AppBar(title: const Text('한 끼 촬영')),
     body: body([
       Text(
-        paths.isEmpty ? '1. 한 끼 전체를 위에서 촬영하세요' : '2. 다른 각도에서 높이가 보이도록 촬영하세요',
+        paths.isEmpty ? '한 끼를 촬영하거나 갤러리에서 선택하세요' : '선택한 사진을 확인하고 분석하세요',
         style: Theme.of(context).textTheme.titleLarge,
       ),
       gap(),
       const Text(
-        '최대 3장 · 밝은 곳에서 촬영하세요. 현재 사진 기반 분석이며 AR 자동 부피 측정은 실기기 검증 후 연결됩니다.',
+        '사진 촬영 시 지원 기기에서 거리 정보를 함께 수집합니다. 안내에 따라 잠시 휴대폰을 움직여 주세요. 갤러리 사진은 최대 3장까지 선택할 수 있습니다.',
       ),
       gap(),
       Wrap(
@@ -627,54 +746,60 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
         ],
       ),
       gap(),
-      TextButton(
-        onPressed: busy
-            ? null
-            : () async {
-                final result = await ArCapabilities.check();
-                if (mounted) {
-                  setState(
-                    () => arInfo =
-                        '${result['device'] ?? ''}\nARCore: ${result['arCore']} · 깊이: ${result['depth'] ?? '확인 필요'}\n${result['reason'] ?? ''}',
-                  );
-                }
-              },
-        child: const Text('이 기기의 AR 지원 확인'),
-      ),
-      OutlinedButton.icon(
-        onPressed: busy
-            ? null
-            : () async {
-                try {
-                  await ArCapabilities.openDiagnostics();
-                } catch (e) {
-                  if (context.mounted) notify(context, e);
-                }
-              },
-        icon: const Icon(Icons.view_in_ar),
-        label: const Text('AR 깊이 진단 · 실험'),
-      ),
-      const Text(
-        'AR 진단은 깊이·신뢰도를 확인하는 별도 실험입니다. 저장 데이터는 기기에 보관되며 식단 분석에 자동 반영되지 않습니다.',
-      ),
       if (arInfo != null) Text(arInfo!),
       OutlinedButton.icon(
-        onPressed: paths.length >= 3 || busy || saved != null ? null : capture,
+        onPressed:
+            paths.length >= 3 ||
+                busy ||
+                saved != null ||
+                captureInfo['method'] == 'ar_assisted_photo'
+            ? null
+            : capturePhoto,
         icon: const Icon(Icons.camera_alt),
         label: const Text('사진 촬영'),
       ),
-      CheckboxListTile(
-        value: consent,
-        onChanged: busy ? null : (v) => setState(() => consent = v ?? false),
-        title: const Text('사진을 OpenAI API에 전달하여 분석하는 데 동의합니다.'),
-        subtitle: const Text(
-          '사진은 식단 삭제 시까지 서버에 보관합니다. 분석 결과는 추정치이며 확인·수정할 수 있습니다.',
+      OutlinedButton.icon(
+        onPressed:
+            paths.length >= 3 ||
+                busy ||
+                saved != null ||
+                captureInfo['method'] == 'ar_assisted_photo'
+            ? null
+            : () => capture(ImageSource.gallery),
+        icon: const Icon(Icons.photo_library),
+        label: const Text('갤러리에서 선택'),
+      ),
+      if (paths.isNotEmpty && saved == null)
+        TextButton(
+          onPressed: busy
+              ? null
+              : () => setState(() {
+                  paths.clear();
+                  arInfo = null;
+                  captureInfo = {
+                    'method': 'guided_photos',
+                    'volumeValidated': false,
+                  };
+                }),
+          child: const Text('선택 초기화'),
         ),
+      const Text('갤러리 사진은 사진 기반 참고 추정입니다. 크기 판단이 어려우면 중량 입력을 요청할 수 있습니다.'),
+      const Text(
+        '음식 분석을 위해 사진과 첨부된 AR 깊이 요약을 외부 AI에 전송합니다. 최초 이용 시 안내와 동의를 진행합니다.',
+      ),
+      TextButton(
+        onPressed: busy
+            ? null
+            : () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const AiConsentScreen()),
+              ),
+        child: const Text('AI 전송 안내 자세히 보기'),
       ),
       FilledButton(
-        onPressed: paths.isEmpty || !consent || busy ? null : send,
-        child: Text(busy ? '저장 중…' : '자동 저장하고 분석'),
+        onPressed: paths.isEmpty || busy ? null : send,
+        child: Text(busy ? '처리 중…' : '자동 저장하고 분석'),
       ),
+      if (busy) const LinearProgressIndicator(),
       if (saved != null) const Text('전송 실패 시 홈에서 다시 전송할 수 있습니다.'),
     ]),
   );
@@ -755,6 +880,8 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
     if (index != null) {
       items[index]['nutrition'] = null;
       items[index]['confirmed'] = false;
+      items[index].remove('weightEstimate');
+      items[index].remove('uncertainty');
     }
   }
 
@@ -795,7 +922,6 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
             'name': item['name'],
             'grams': item['grams'],
             'foodId': item['foodId'],
-            'confirmed': item['confirmed'] == true,
           },
       ],
     };
@@ -857,13 +983,31 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
     }
   }
 
+  void selectFood(int index, Map<String, dynamic> selected) {
+    setState(() {
+      items[index]['foodId'] = selected['id'];
+      items[index]['name'] = selected['name'];
+      items[index]['source'] = selected;
+      items[index].remove('_editedName');
+      items[index].remove('candidates');
+      changed(index);
+      formGeneration++;
+    });
+  }
+
+  String foodLabel(Map food) =>
+      '${food['name']}${(food['manufacturer'] ?? '').toString().trim().isEmpty ? '' : ' · ${food['manufacturer']}'}';
+
   Future<void> search(int index) async {
-    final controller = TextEditingController(text: items[index]['name']);
+    final controller = TextEditingController();
     final query = await showDialog<String>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('영양 DB 검색'),
-        content: TextField(controller: controller),
+        title: const Text('음식 검색'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: '음식 이름'),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(c),
@@ -885,31 +1029,25 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
       final selected = await showDialog<Map<String, dynamic>>(
         context: context,
         builder: (c) => SimpleDialog(
-          title: const Text('계산 기준 음식 선택'),
+          title: const Text('먹은 음식과 가장 가까운 항목을 선택하세요'),
           children: [
             if ((results as List).isEmpty)
               const Padding(
                 padding: EdgeInsets.all(16),
-                child: Text('일치 자료가 없습니다. 공식 영양 자료 적재 상태를 확인해 주세요.'),
+                child: Text('일치하는 음식을 찾지 못했어요. 더 짧은 음식 이름이나 비슷한 음식으로 검색해 주세요.'),
               ),
             for (final f in results)
               SimpleDialogOption(
                 onPressed: () => Navigator.pop(c, Map<String, dynamic>.from(f)),
                 child: Text(
-                  '${f['name']} · ${f['basis_grams']}g 기준\n${f['source']}',
+                  '${foodLabel(f)}${f['searchFallback'] == true ? '\n비슷한 음식입니다. 실제 음식과 비교해 주세요.' : ''}',
                 ),
               ),
           ],
         ),
       );
       if (selected != null && mounted) {
-        setState(() {
-          items[index]['foodId'] = selected['id'];
-          items[index]['name'] = selected['name'];
-          items[index]['source'] = selected;
-          changed(index);
-          formGeneration++;
-        });
+        selectFood(index, selected);
       }
     } catch (e) {
       if (mounted) notify(context, e);
@@ -945,174 +1083,279 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
         ),
       ],
     ),
-    body: body([
-      if (error != null) Text(error!),
-      if (conflict)
-        TextButton(
-          onPressed: busy ? null : reloadConflict,
-          child: const Text('최신 기록 불러오기'),
-        ),
-      if (saveNotice != null)
-        Text(saveNotice!, key: const ValueKey('save-notice')),
-      if (meal == null) const LinearProgressIndicator(),
-      if (meal != null) ...[
-        Text(
-          stateLabel(meal!['status']),
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
-        gap(),
-        const Text('식전 제공량 기준 추정치입니다. 실제 먹은 중량과 영양 DB 항목을 확인한 후 저장하세요.'),
-        if (meal!['status'] == 'QUEUED' && meal!['analysisEnabled'] == false)
-          const Text('서버의 자동 분석이 일시 중지되어 있습니다. 사진은 저장됐으며 분석이 활성화되면 처리됩니다.'),
-        if (meal!['status'] == 'QUEUED' && meal!['analysisEnabled'] != false)
-          const Text('분석 순서를 기다리고 있습니다. 완료되면 결과가 자동 표시됩니다.'),
-        for (final a
-            in (meal!['status'] == 'COMPLETE' || saveNotice != null
-                    ? []
-                    : meal!['analyses'])
-                as List)
-          if (a['error_code'] != null) Text(analysisHint(a['error_code'])),
-        gap(),
-        for (var i = 0; i < items.length; i++)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  TextFormField(
-                    enabled: !busy,
-                    key: ValueKey(
-                      'name-$formGeneration-$i-${items[i]['foodId']}',
-                    ),
-                    initialValue: items[i]['name'],
-                    decoration: const InputDecoration(labelText: '음식명'),
-                    onChanged: (v) => setState(() {
-                      items[i]['name'] = v;
-                      changed(i);
-                    }),
-                  ),
-                  gap(),
-                  TextFormField(
-                    enabled: !busy,
-                    key: ValueKey('grams-$formGeneration-$i'),
-                    initialValue: items[i]['grams']?.toString() ?? '',
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: const InputDecoration(labelText: '먹은 중량 (g)'),
-                    onChanged: (v) => setState(() {
-                      items[i]['grams'] = double.tryParse(v);
-                      changed(i);
-                    }),
-                  ),
-                  TextButton(
-                    onPressed: busy ? null : () => search(i),
-                    child: Text(
-                      (items[i]['foodId'] ?? '').toString().isEmpty
-                          ? '영양 DB 항목 선택'
-                          : 'DB 항목: ${items[i]['foodId']}',
-                    ),
-                  ),
-                  if (items[i]['nutrition'] != null)
-                    Text(
-                      '참고 추정: ${items[i]['nutrition']['kcal']} kcal\n탄수화물 ${items[i]['nutrition']['carbs']} g · 단백질 ${items[i]['nutrition']['protein']} g · 지방 ${items[i]['nutrition']['fat']} g\n자료원: ${items[i]['source']?['source'] ?? ''}',
-                    ),
-                  for (final issue in mealItemIssues(items[i]))
-                    Text('• $issue'),
-                  if (dirty && items[i]['nutrition'] == null)
-                    const Text('입력값이 변경되었습니다. 저장하면 영양값을 다시 계산합니다.'),
-                  if ((items[i]['uncertainty'] ?? '').toString().isNotEmpty)
-                    Text('추정 참고: ${items[i]['uncertainty']}'),
-                  CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('음식·중량·DB 항목을 확인했습니다'),
-                    value: items[i]['confirmed'] == true,
-                    onChanged: busy
-                        ? null
-                        : (v) => setState(() {
-                            items[i]['confirmed'] = v;
-                            changed();
-                          }),
-                  ),
-                  TextButton(
-                    onPressed: busy
-                        ? null
-                        : () => setState(() {
-                            items.removeAt(i);
-                            changed();
-                            formGeneration++;
-                          }),
-                    child: const Text('이 음식 삭제'),
-                  ),
-                ],
+    body: !dirty && ['QUEUED', 'RUNNING'].contains(meal?['status'])
+        ? AnalysisLoading(
+            queued: meal?['status'] == 'QUEUED',
+            paused:
+                meal?['status'] == 'QUEUED' &&
+                meal?['analysisEnabled'] == false,
+            error: error,
+            onRetry: load,
+          )
+        : body([
+            if (error != null) Text(error!),
+            if (conflict)
+              TextButton(
+                onPressed: busy ? null : reloadConflict,
+                child: const Text('최신 기록 불러오기'),
               ),
-            ),
-          ),
-        OutlinedButton(
-          onPressed: busy
-              ? null
-              : () => setState(() {
-                  items.add({
-                    'name': '',
-                    'grams': null,
-                    'foodId': '',
-                    'confirmed': false,
-                  });
-                  changed();
-                }),
-          child: const Text('음식 추가'),
-        ),
-        FilledButton(
-          onPressed: busy ? null : saveMeal,
-          child: Text(saving ? '저장 및 영양 재계산 중…' : '수정 저장 · 영양 재계산'),
-        ),
-        if (saving) const LinearProgressIndicator(),
-        if (saveNotice != null) Text(saveNotice!),
-        if (error != null) Text(error!),
-        const Text('이 버튼은 입력한 중량과 DB 자료로 계산합니다. 사진 재분석은 아래 AI 분석 버튼을 이용해 주세요.'),
-        TextButton(
-          onPressed:
-              busy || dirty || ['QUEUED', 'RUNNING'].contains(meal!['status'])
-              ? null
-              : () => action(() async {
-                  await ref
-                      .read(apiProvider)
-                      .request('POST', '/meals/${widget.id}/analyses');
-                  await load();
-                }),
-          child: const Text('AI 분석 다시 요청'),
-        ),
-        TextButton(
-          onPressed: busy
-              ? null
-              : () => action(() async {
-                  final yes = await showDialog<bool>(
-                    context: context,
-                    builder: (c) => AlertDialog(
-                      title: const Text('이 식단과 사진을 삭제할까요?'),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(c, false),
-                          child: const Text('취소'),
+            if (saveNotice != null)
+              Text(saveNotice!, key: const ValueKey('save-notice')),
+            if (meal == null) const LinearProgressIndicator(),
+            if (meal != null) ...[
+              Card(
+                key: const ValueKey('meal-total'),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '한 끼 전체 영양정보',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      gap(),
+                      NutritionTable(
+                        values: dirty ? {} : mealNutritionTotals(items),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        dirty
+                            ? '수정 내용을 저장하면 전체 영양정보가 갱신됩니다.'
+                            : '현재 음식별 산출값의 합계입니다. 계산 대기 항목은 보정 후 합계가 표시됩니다.',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              gap(),
+              Text(
+                stateLabel(meal!['status']),
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              gap(),
+              const Text(
+                '식전 제공량 기준 추정치입니다. 중량과 영양정보가 확인되면 자동으로 합계에 반영됩니다. 실제 먹은 양과 다르면 수정할 수 있습니다.',
+              ),
+              Text(
+                meal!['capture_info']?['method'] == 'ar_assisted_photo'
+                    ? '분석 방식: AR 깊이 요약을 보조 근거로 사용한 AI 추정 · 부피/밀도 실측 전'
+                    : meal!['capture_info']?['method'] == 'gallery_photos'
+                    ? '분석 방식: 갤러리 사진 기반 AI 추정'
+                    : '분석 방식: 카메라 사진 기반 AI 추정',
+              ),
+              if (meal!['status'] == 'QUEUED' &&
+                  meal!['analysisEnabled'] == false)
+                const Text(
+                  '서버의 자동 분석이 일시 중지되어 있습니다. 사진은 저장됐으며 분석이 활성화되면 처리됩니다.',
+                ),
+              if (meal!['status'] == 'QUEUED' &&
+                  meal!['analysisEnabled'] != false)
+                const Text('분석 순서를 기다리고 있습니다. 완료되면 결과가 자동 표시됩니다.'),
+              for (final a
+                  in (meal!['status'] == 'COMPLETE' || saveNotice != null
+                          ? []
+                          : meal!['analyses'])
+                      as List)
+                if (a['error_code'] != null)
+                  Text(analysisHint(a['error_code'])),
+              gap(),
+              Text('음식별 영양정보', style: Theme.of(context).textTheme.titleLarge),
+              for (var i = 0; i < items.length; i++)
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '음식 ${i + 1}',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        gap(),
+                        ExpansionTile(
+                          title: const Text('섭취 정보 직접 수정'),
+                          children: [
+                            TextFormField(
+                              enabled: !busy,
+                              key: ValueKey('name-$formGeneration-$i'),
+                              initialValue: items[i]['_editedName'] ?? '',
+                              decoration: const InputDecoration(
+                                labelText: '새 음식 이름 (직접 입력)',
+                              ),
+                              onChanged: (v) => setState(() {
+                                items[i]['_editedName'] = v;
+                                items[i]['name'] = v;
+                                items[i].remove('candidates');
+                                items[i]['foodId'] = '';
+                                items[i]['source'] = null;
+                                changed(i);
+                              }),
+                            ),
+                            gap(),
+                            TextFormField(
+                              enabled: !busy,
+                              key: ValueKey('grams-$formGeneration-$i'),
+                              initialValue: items[i]['_editedGrams'] ?? '',
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                    decimal: true,
+                                  ),
+                              decoration: const InputDecoration(
+                                labelText: '실제 먹은 중량 (g, 직접 입력)',
+                              ),
+                              onChanged: (v) => setState(() {
+                                items[i]['_editedGrams'] = v;
+                                items[i]['grams'] = double.tryParse(v);
+                                changed(i);
+                              }),
+                            ),
+                          ],
                         ),
                         TextButton(
-                          onPressed: () => Navigator.pop(c, true),
-                          child: const Text('삭제'),
+                          onPressed: busy ? null : () => search(i),
+                          child: Text(
+                            (items[i]['foodId'] ?? '').toString().isEmpty
+                                ? '음식 선택'
+                                : '음식 변경',
+                          ),
+                        ),
+                        NutritionTable(values: items[i]['nutrition'] ?? {}),
+                        if ((items[i]['foodId'] ?? '').toString().isEmpty &&
+                            (items[i]['candidates'] as List? ?? [])
+                                .isNotEmpty) ...[
+                          const Text('이 음식이 맞나요? 실제 음식과 가까운 후보를 선택해 주세요.'),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              for (final candidate
+                                  in (items[i]['candidates'] as List).take(5))
+                                ActionChip(
+                                  label: Text(foodLabel(candidate)),
+                                  onPressed: busy
+                                      ? null
+                                      : () => selectFood(
+                                          i,
+                                          Map<String, dynamic>.from(candidate),
+                                        ),
+                                ),
+                            ],
+                          ),
+                        ],
+                        ExpansionTile(
+                          key: ValueKey('evidence-$formGeneration-$i'),
+                          title: const Text('계산 근거 보기'),
+                          childrenPadding: const EdgeInsets.all(12),
+                          expandedCrossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '기준 음식: ${items[i]['source']?['name'] ?? '확인 필요'}',
+                            ),
+                            Text(
+                              '자료원: ${items[i]['source']?['source'] ?? '확인 필요'}',
+                            ),
+                            Text(
+                              '자료 버전: ${items[i]['source']?['source_version'] ?? '확인 필요'}',
+                            ),
+                            Text(
+                              '기준량: ${items[i]['source']?['basis_grams'] ?? '확인 필요'} ${items[i]['source']?['basis_unit'] ?? ''}',
+                            ),
+                            const Text('영양값 = 기준 영양값 × 입력 중량 ÷ 기준 중량'),
+                            if (dirty) const Text('수정된 값은 저장 후 계산 결과에 반영됩니다.'),
+                          ],
+                        ),
+                        for (final issue in mealItemIssues(items[i]))
+                          Text('• $issue'),
+                        if (dirty && items[i]['nutrition'] == null)
+                          const Text('입력값이 변경되었습니다. 저장하면 영양값을 다시 계산합니다.'),
+                        TextButton(
+                          onPressed: busy
+                              ? null
+                              : () => setState(() {
+                                  items.removeAt(i);
+                                  changed();
+                                  formGeneration++;
+                                }),
+                          child: const Text('이 음식 삭제'),
                         ),
                       ],
                     ),
-                  );
-                  if (yes == true) {
-                    await ref
-                        .read(apiProvider)
-                        .request('DELETE', '/meals/${widget.id}');
-                    if (context.mounted) context.go('/home');
-                  }
-                }),
-          child: const Text('식단 삭제'),
-        ),
-      ],
-    ]),
+                  ),
+                ),
+              OutlinedButton(
+                onPressed: busy
+                    ? null
+                    : () => setState(() {
+                        items.add({
+                          'name': '',
+                          'grams': null,
+                          'foodId': '',
+                          'confirmed': false,
+                        });
+                        changed();
+                      }),
+                child: const Text('음식 추가'),
+              ),
+              FilledButton(
+                onPressed: busy ? null : saveMeal,
+                child: Text(saving ? '저장 및 영양 재계산 중…' : '수정 저장 · 영양 재계산'),
+              ),
+              if (saving) const LinearProgressIndicator(),
+              if (saveNotice != null) Text(saveNotice!),
+              if (error != null) Text(error!),
+              const Text(
+                '입력한 중량과 선택한 음식의 영양정보로 다시 계산합니다. 사진 재분석은 아래 AI 분석 버튼을 이용해 주세요.',
+              ),
+              TextButton(
+                onPressed:
+                    busy ||
+                        dirty ||
+                        ['QUEUED', 'RUNNING'].contains(meal!['status'])
+                    ? null
+                    : () => action(() async {
+                        if (!await ensureAiConsent(
+                          context,
+                          ref.read(apiProvider),
+                        )) {
+                          return;
+                        }
+                        await ref
+                            .read(apiProvider)
+                            .request('POST', '/meals/${widget.id}/analyses');
+                        await load();
+                      }),
+                child: const Text('AI 분석 다시 요청'),
+              ),
+              TextButton(
+                onPressed: busy
+                    ? null
+                    : () => action(() async {
+                        final yes = await showDialog<bool>(
+                          context: context,
+                          builder: (c) => AlertDialog(
+                            title: const Text('이 식단과 사진을 삭제할까요?'),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(c, false),
+                                child: const Text('취소'),
+                              ),
+                              TextButton(
+                                onPressed: () => Navigator.pop(c, true),
+                                child: const Text('삭제'),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (yes == true) {
+                          await ref
+                              .read(apiProvider)
+                              .request('DELETE', '/meals/${widget.id}');
+                          if (context.mounted) context.go('/home');
+                        }
+                      }),
+                child: const Text('식단 삭제'),
+              ),
+            ],
+          ]),
   );
 }

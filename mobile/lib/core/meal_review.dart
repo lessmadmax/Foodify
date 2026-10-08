@@ -10,11 +10,13 @@ List<String> mealItemIssues(Map<String, dynamic> item) {
   if (!validGrams) issues.add('중량을 0보다 크고 10,000g 이하인 숫자로 입력해 주세요.');
   final hasFood = (item['foodId'] ?? '').toString().isNotEmpty;
   if (!hasFood) {
-    issues.add('영양 DB 항목을 선택해 주세요.');
+    if ((item['candidates'] as List? ?? []).isEmpty) {
+      issues.add('영양정보를 찾기 위해 음식을 선택해 주세요.');
+    }
   } else if (item['source'] is Map) {
     final source = item['source'] as Map;
     if (source['basis_unit'] != 'g' || source['searchable'] == false) {
-      issues.add('중량(g) 계산이 가능한 영양 DB 항목을 다시 선택해 주세요.');
+      issues.add('중량에 맞춰 계산할 수 있는 다른 음식을 선택해 주세요.');
     } else {
       final missing = <String>[
         for (final entry in {
@@ -26,14 +28,11 @@ List<String> mealItemIssues(Map<String, dynamic> item) {
           if (source[entry.key] == null) entry.value,
       ];
       if (missing.isNotEmpty) {
-        issues.add('선택한 DB에 ${missing.join(', ')} 값이 없습니다. 다른 DB 항목을 선택해 주세요.');
+        issues.add('선택한 음식에 ${missing.join(', ')} 정보가 없습니다. 다른 음식을 선택해 주세요.');
       }
     }
   } else if (validGrams && item['nutrition'] == null) {
-    issues.add('영양 DB 근거를 확인할 수 없습니다. DB 항목을 다시 선택해 주세요.');
-  }
-  if (item['confirmed'] != true) {
-    issues.add('음식·중량·DB 항목 확인 체크가 필요합니다.');
+    issues.add('영양정보를 확인하기 위해 음식을 다시 선택해 주세요.');
   }
   return issues;
 }

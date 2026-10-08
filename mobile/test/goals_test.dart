@@ -66,7 +66,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('목표 자동 계산'));
     await tester.pumpAndSettle();
-    expect(find.text('하루 참고 목표: 2136 kcal'), findsOneWidget);
+    expect(find.text('2136.0 kcal'), findsOneWidget);
     final request = adapter.requests.last;
     expect(request.path, '/me/goals/preview');
     expect(request.data['age'], 30);
@@ -74,7 +74,7 @@ void main() {
     expect((request.data as Map).containsKey('purpose'), isFalse);
     await tester.enterText(inputs.at(2), '81');
     await tester.pumpAndSettle();
-    expect(find.text('하루 참고 목표: 2136 kcal'), findsNothing);
+    expect(find.text('2136.0 kcal'), findsNothing);
     expect(find.text('이 목표 저장'), findsNothing);
   });
 }

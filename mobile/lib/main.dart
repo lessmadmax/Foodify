@@ -32,7 +32,18 @@ class FoodifyApp extends StatelessWidget {
       routerConfig: router,
       theme: ThemeData(
         useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff236849)),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xff238653),
+          primary: const Color(0xff197344),
+          secondary: const Color(0xff39865a),
+          primaryContainer: const Color(0xffd9f2df),
+          surface: const Color(0xfff6fbf7),
+        ),
+        scaffoldBackgroundColor: const Color(0xfff6fbf7),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xff197344),
+          foregroundColor: Colors.white,
+        ),
         inputDecorationTheme: const InputDecorationTheme(
           border: OutlineInputBorder(),
         ),

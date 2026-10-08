@@ -50,7 +50,19 @@ public class MealService {
         if(((Number)meal.get("version")).longValue()!=version) throw ApiError.conflict("STALE_VERSION");
         if(!items.isArray() || items.size()>50) throw ApiError.bad("INVALID_ITEMS");
         var computed=new ArrayList<Map<String,Object>>();
-        items.forEach(item->computed.add(foods.calculate(item)));
+        var previous=(JsonNode)meal.get("items");
+        items.forEach(item->{
+            var calculated=foods.calculate(item);
+            // Preserve server-generated evidence only for an unambiguous unchanged food/weight.
+            var matching=new ArrayList<JsonNode>();
+            for(var old:previous) if(old.path("name").asText().equals(item.path("name").asText()) &&
+                ((old.path("grams").isNull() && item.path("grams").isNull()) ||
+                 (old.path("grams").isNumber() && item.path("grams").isNumber() && old.path("grams").decimalValue().compareTo(item.path("grams").decimalValue())==0))) matching.add(old);
+            if(matching.size()==1) for(String field:List.of("weightEstimate","uncertainty")) {
+                if(matching.getFirst().has(field)) calculated.put(field,matching.getFirst().get(field));
+            }
+            computed.add(calculated);
+        });
         boolean complete=!computed.isEmpty()&&computed.stream().allMatch(i->"COMPLETE".equals(i.get("status")));
         db.update("UPDATE meals SET items=?,version=version+1,status=? WHERE id=?",json.write(computed),complete?"COMPLETE":"INCOMPLETE",id);
         db.update("UPDATE analyses SET status='SUPERSEDED',updated_at=? WHERE meal_id=? AND status IN ('QUEUED','RUNNING','BUDGET_WAIT')",System.currentTimeMillis(),id);
