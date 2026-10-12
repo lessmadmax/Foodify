@@ -52,7 +52,16 @@ public class MealService {
         var computed=new ArrayList<Map<String,Object>>();
         var previous=(JsonNode)meal.get("items");
         items.forEach(item->{
-            var calculated=foods.calculate(item);
+            var calculationInput=item.deepCopy();
+            // Upgrade the previous server-marked single-food fallback on explicit save.
+            // Trust only stored evidence, not a client-supplied fallback flag.
+            for(var old:previous) if(old.path("name").asText().equals(item.path("name").asText()) &&
+                old.path("foodId").asText().equals(item.path("foodId").asText()) &&
+                "CATEGORY_FALLBACK".equals(old.path("source").path("matchType").asText()) &&
+                !item.path("foodId").asText().startsWith("category:") && calculationInput.isObject()) {
+                ((com.fasterxml.jackson.databind.node.ObjectNode)calculationInput).put("foodId",""); break;
+            }
+            var calculated=foods.calculate(calculationInput);
             // Preserve server-generated evidence only for an unambiguous unchanged food/weight.
             var matching=new ArrayList<JsonNode>();
             for(var old:previous) if(old.path("name").asText().equals(item.path("name").asText()) &&

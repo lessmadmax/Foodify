@@ -86,10 +86,24 @@ Future<void> mountMeal(WidgetTester tester, MealApi api) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  testWidgets('AI 이름·중량·설명과 내부 ID 숨김, 계산 근거는 펼쳐서 확인', (tester) async {
+  test('음식명 및 식단 제목은 저장된 이름을 사용하고 빈 이름은 안내', () {
+    expect(foodDisplayName({'name': ' 불고기버거 '}), '불고기버거');
+    expect(foodDisplayName({'name': ' '}), '음식명 확인 필요');
+    expect(foodDisplayName({}), '음식명 확인 필요');
+    expect(mealDisplayName([]), '분석할 식단');
+    expect(
+      mealDisplayName([
+        {'name': '밥'},
+        {'name': '김치'},
+      ]),
+      '밥, 김치',
+    );
+  });
+  testWidgets('음식명 표시, 중량·설명과 내부 ID 숨김, 계산 근거는 펼쳐서 확인', (tester) async {
     final api = MealApi();
     await mountMeal(tester, api);
-    expect(find.text('음식 1'), findsOneWidget);
+    expect(find.text('시험 음식'), findsOneWidget);
+    expect(find.text('음식 1'), findsNothing);
     expect(find.textContaining('DB 항목:'), findsNothing);
     expect(find.text('음식 변경'), findsOneWidget);
     expect(find.textContaining('자료원: 시험 자료'), findsNothing);
@@ -102,6 +116,7 @@ void main() {
     expect(find.textContaining('자료원: 시험 자료'), findsOneWidget);
   });
   testWidgets('미연결 음식은 후보 선택과 저장으로 보정', (tester) async {
+    // Ordinary manual selection continues to update the displayed name.
     final data = record();
     final item = data['items'][0];
     item['foodId'] = '';
@@ -126,6 +141,7 @@ void main() {
     expect(find.textContaining('이 음식이 맞나요?'), findsOneWidget);
     await tester.tap(find.text('후보 음식 · 시험 제조사'));
     await tester.pumpAndSettle();
+    expect(find.text('후보 음식'), findsOneWidget);
     expect(find.textContaining('이 음식이 맞나요?'), findsNothing);
     await tester.ensureVisible(find.text('수정 저장 · 영양 재계산'));
     await tester.tap(find.text('수정 저장 · 영양 재계산'));
@@ -134,6 +150,16 @@ void main() {
     expect(api.payload['items'][0]['grams'], 100);
     api.write.complete(record(complete: true));
     await tester.pumpAndSettle();
+  });
+  testWidgets('대체 영양정보 안내와 원래 음식명 표시', (tester) async {
+    final data = record(complete: true);
+    data['items'][0]['name'] = '무청김치';
+    data['items'][0]['source']['fallbackNotice'] =
+        '김치류 대체 영양정보(배추김치)를 적용한 참고 추정값입니다.';
+    await mountMeal(tester, MealApi()..readRecord = data);
+    expect(find.text('무청김치'), findsOneWidget);
+    expect(find.textContaining('김치류 대체 영양정보'), findsOneWidget);
+    expect(find.text('200.0 kcal'), findsNWidgets(2));
   });
   test('미완료 이유에 빠진 영양소와 확인 체크를 구분', () {
     final item = Map<String, dynamic>.from((record()['items'] as List).first);

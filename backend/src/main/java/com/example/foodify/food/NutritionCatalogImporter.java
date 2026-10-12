@@ -22,10 +22,12 @@ public class NutritionCatalogImporter implements ApplicationRunner {
     private final String file;
     private final boolean exit;
     private final ConfigurableApplicationContext context;
+    private final FoodCategoryService categories;
     public NutritionCatalogImporter(JdbcTemplate db, TransactionTemplate tx, Json json,
             @Value("${app.import-catalog:}") String file,
-            @Value("${app.import-exit:false}") boolean exit, ConfigurableApplicationContext context) {
+            @Value("${app.import-exit:false}") boolean exit, ConfigurableApplicationContext context, FoodCategoryService categories) {
         this.db=db; this.tx=tx; this.json=json; this.file=file; this.exit=exit; this.context=context;
+        this.categories=categories;
     }
     @Override public void run(ApplicationArguments args) throws Exception {
         if(file.isBlank()) return;
@@ -45,6 +47,7 @@ public class NutritionCatalogImporter implements ApplicationRunner {
                     int col=3; for(String key:List.of("kcal","carbs","protein","fat","source","source_date","id")) ps.setObject(col++,r.get(key));
                 });
             });
+            categories.invalidate();
         }
     }
     private boolean exists(String table,String id) {

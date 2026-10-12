@@ -15,6 +15,15 @@ import 'chat_screen.dart';
 
 String date(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+String foodDisplayName(Map item) {
+  final name = item['name'];
+  return name is String && name.trim().isNotEmpty ? name.trim() : '음식명 확인 필요';
+}
+
+String mealDisplayName(List items) => items.isEmpty
+    ? '분석할 식단'
+    : items.map((item) => foodDisplayName(item as Map)).join(', ');
+
 String stateLabel(dynamic s) => switch (s) {
   'QUEUED' => '접수',
   'RUNNING' => '분석 중',
@@ -538,9 +547,9 @@ class _HomeState extends ConsumerState<HomeScreen> {
             child: ListTile(
               leading: const Icon(Icons.restaurant),
               title: Text(
-                (m['items'] as List).isEmpty
-                    ? '분석할 식단'
-                    : '식단 기록 · 음식 ${(m['items'] as List).length}개',
+                mealDisplayName(m['items'] as List),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
               subtitle: Text(
                 '${date(DateTime.fromMillisecondsSinceEpoch(m['eaten_at']))} · ${stateLabel(m['status'])}',
@@ -986,7 +995,9 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
   void selectFood(int index, Map<String, dynamic> selected) {
     setState(() {
       items[index]['foodId'] = selected['id'];
-      items[index]['name'] = selected['name'];
+      if (selected['matchType'] != 'CATEGORY_FALLBACK') {
+        items[index]['name'] = selected['name'];
+      }
       items[index]['source'] = selected;
       items[index].remove('_editedName');
       items[index].remove('candidates');
@@ -1169,7 +1180,7 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          '음식 ${i + 1}',
+                          foodDisplayName(items[i]),
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         gap(),
@@ -1221,6 +1232,8 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                           ),
                         ),
                         NutritionTable(values: items[i]['nutrition'] ?? {}),
+                        if (items[i]['source']?['fallbackNotice'] is String)
+                          Text(items[i]['source']['fallbackNotice']),
                         if ((items[i]['foodId'] ?? '').toString().isEmpty &&
                             (items[i]['candidates'] as List? ?? [])
                                 .isNotEmpty) ...[

@@ -43,12 +43,15 @@ public class AnalysisWorker {
                 output.put("foodId","");output.put("confirmed",false);output.put("nutrition",null);output.put("status","NEEDS_REVIEW");
                 output.put("ingredients",item.get("ingredients"));output.put("uncertainty",item.path("uncertainty").asText());
                 output.put("candidates",foods.search(item.path("name").asText()));items.add(output);
+                var candidates=(List<?>)output.get("candidates");
+                if(candidates.size()==1 && candidates.getFirst() instanceof Map<?,?> candidate && "CATEGORY_FALLBACK".equals(candidate.get("matchType"))) output.put("foodId",candidate.get("id"));
             }
             AiConsent.require(db,member);
             suggestMatches(items);
             // Complete automatically when each food has valid weight and nutrition evidence.
             for(var item:items) {
                 var calculated=foods.calculate(json.read(json.write(item)));
+                item.put("foodId",calculated.get("foodId"));
                 item.put("nutrition",calculated.get("nutrition"));
                 item.put("source",calculated.get("source"));
                 item.put("status",calculated.get("status"));
@@ -70,12 +73,13 @@ public class AnalysisWorker {
     @SuppressWarnings("unchecked")
     private void suggestMatches(List<Map<String,Object>> items) {
         var evidence=new ArrayList<Map<String,Object>>();
-        for(int i=0;i<items.size();i++) {var item=items.get(i);if(!((List<?>)item.get("candidates")).isEmpty())evidence.add(Map.of("index",i,"name",item.get("name"),"ingredients",item.get("ingredients"),"candidates",item.get("candidates")));}
+        for(int i=0;i<items.size();i++) {var item=items.get(i);if(item.get("foodId").toString().isEmpty() && !((List<?>)item.get("candidates")).isEmpty())evidence.add(Map.of("index",i,"name",item.get("name"),"ingredients",item.get("ingredients"),"candidates",item.get("candidates")));}
         if(evidence.isEmpty())return;
         try {
             var choices=ai.chooseCandidates(evidence);
             for(var choice:choices.path("selections")) {
                 int index=choice.path("index").asInt(-1);if(index<0||index>=items.size())continue;
+                if(!items.get(index).get("foodId").toString().isEmpty()) continue;
                 String foodId=choice.path("foodId").asText("");
                 var candidates=(List<Map<String,Object>>)items.get(index).get("candidates");
                 if(candidates.stream().anyMatch(c->foodId.equals(c.get("id"))))items.get(index).put("foodId",foodId);
