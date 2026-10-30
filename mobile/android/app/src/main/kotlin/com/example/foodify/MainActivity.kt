@@ -10,10 +10,13 @@ import android.content.Intent
 import com.example.foodify.ar.ArDiagnosticActivity
 
 class MainActivity : FlutterActivity() {
+    private var localModel: com.example.foodify.local.LocalModelBridge? = null
+    private var segmentation: com.example.foodify.local.SegmentationBridge? = null
     private var captureResult: MethodChannel.Result? = null
     @Deprecated("Android activity result bridge")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 7402) { localModel?.onFileResult(resultCode, data); return }
         if (requestCode != 7401) return
         val pending = captureResult ?: return
         captureResult = null
@@ -29,6 +32,8 @@ class MainActivity : FlutterActivity() {
     }
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        localModel = com.example.foodify.local.LocalModelBridge(this, flutterEngine.dartExecutor.binaryMessenger)
+        segmentation = com.example.foodify.local.SegmentationBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "foodify/ar")
             .setMethodCallHandler { call, result ->
                 if (call.method == "captureMeal") {
@@ -61,5 +66,10 @@ class MainActivity : FlutterActivity() {
                 result.success(mapOf("arCore" to availability.name, "depth" to depth, "reason" to reason,
                     "volumeValidated" to false, "device" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"))
             }
+    }
+    override fun onDestroy() {
+        localModel?.dispose()
+        segmentation?.dispose()
+        super.onDestroy()
     }
 }

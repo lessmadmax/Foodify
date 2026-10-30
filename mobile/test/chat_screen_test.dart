@@ -38,6 +38,31 @@ class ChatApi extends Api {
 }
 
 void main() {
+  testWidgets('저장된 답변은 서식 표시하고 사용자 입력 원문은 유지', (tester) async {
+    final api = ChatApi();
+    api.turns.add({
+      'question': '**단백질**은?',
+      'answer': '## 식단 요약\n\n**단백질**을 챙겨보세요.',
+      'status': 'COMPLETE',
+      'from': '2026-10-20',
+      'to': '2026-10-26',
+      'asOf': 1000,
+      'incompleteMeals': 0,
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [apiProvider.overrideWithValue(api)],
+        child: const MaterialApp(home: ChatScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('**단백질**은?'), findsOneWidget);
+    expect(find.text('식단 요약', findRichText: true), findsWidgets);
+    expect(find.text('## 식단 요약\n\n**단백질**을 챙겨보세요.'), findsNothing);
+    expect(find.byTooltip('답변 복사'), findsOneWidget);
+    expect(api.requests, isEmpty);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
   testWidgets('채팅 전송·중복 방지·답변 근거·후속 질문·대화 삭제', (tester) async {
     final api = ChatApi()..wait = Completer<void>();
     await tester.pumpWidget(

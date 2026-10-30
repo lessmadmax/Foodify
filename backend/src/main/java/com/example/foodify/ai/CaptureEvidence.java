@@ -7,6 +7,12 @@ import java.util.*;
 /** Whitelisted, untrusted client measurements; never authoritative mass. */
 public final class CaptureEvidence {
     private CaptureEvidence() {}
+    public static Map<String,Object> normalizeForStorage(JsonNode input, int imageCount) {
+        var result=normalize(input,imageCount);
+        var regions=RegionEvidence.normalize(input,imageCount);
+        if(!regions.isEmpty()) result.put("regionDrafts",regions);
+        return result;
+    }
     public static Map<String,Object> normalize(JsonNode input, int imageCount) {
         String method = input.path("method").asText("guided_photos");
         if (!List.of("guided_photos", "gallery_photos", "ar_assisted_photo").contains(method)) method = "guided_photos";

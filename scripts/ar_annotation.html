@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Foodify AR 음식·접시 영역 지정</title>
+<style>
+body{font:16px/1.6 system-ui;max-width:1100px;margin:24px auto;padding:0 16px;color:#18372b;background:#f4f8f5}
+canvas{width:100%;height:auto;border:1px solid #728b7c;cursor:crosshair;touch-action:manipulation}
+button,input,select{font:inherit;padding:8px;margin:4px;border:1px solid #9aae9f;border-radius:6px}
+button{background:#e0f1e5;color:#18372b}label{display:inline-block}#status{font-weight:bold}
+</style>
+<h1>음식 부피 실험용 영역 지정</h1>
+<p>사진에서 음식 테두리를 순서대로 눌러 다각형을 완성하세요. 다음으로 음식과 같은 높이의 받침면인
+<strong>평평한 접시 바닥</strong>을 여러 곳 지정하세요. 접시 테두리·식탁은 기준면과 높이가 다를 수 있어요.
+원본 카메라 방향을 유지한 사진입니다.</p>
+<label>지정 영역 <select id="mode"><option value="food">음식 (초록)</option><option value="base">접시 바닥 (파랑)</option></select></label>
+<button id="finish">영역 완성</button><button id="undo">마지막 점 취소</button><button id="clear">선택 종류의 영역 초기화</button>
+<p id="status" role="status"></p><canvas id="canvas"></canvas>
+<p><label>생성된 마스크·영역 파일 불러오기 <input id="import" type="file" accept=".json"></label></p>
+<p>초록색 경계를 확인하세요. 접시가 포함되면 보정 점을 추가해 다시 분할하거나, 음식 영역을 초기화하고 테두리를 다시 지정하세요.</p>
+<div>
+<label>음식명 <input id="name"></label>
+<label>실측 중량(g) <input id="scale" type="number" min=".01" step="any"></label>
+<label>환산 밀도(g/mL, 선택) <input id="density" type="number" min=".001" max="5" step="any"></label>
+<label>밀도 근거 <input id="source" placeholder="별도 보정 자료의 ID 등"></label>
+</div>
+<p>실측 중량은 결과 비교에 사용합니다. 밀도는 별도 보정용 자료에서 정한 값을 입력하세요.</p>
+<button id="download">경계 검토 후 영역 지정 파일 저장</button>
+<script>
+const canvas=document.getElementById('canvas'),ctx=canvas.getContext('2d'),img=new Image();
+const mode=document.getElementById('mode'),status=document.getElementById('status');
+const polygons={food:[],base:[]};let pending=[],maskSpec=null,maskOverlay=null,segmentation=null;
+function draw(){
+ ctx.drawImage(img,0,0);ctx.lineWidth=Math.max(2,canvas.width/400);
+ if(maskOverlay)ctx.drawImage(maskOverlay,0,0,canvas.width,canvas.height);
+ for(const kind of ['food','base']){
+  ctx.strokeStyle=kind==='food'?'#00c65a':'#168bff';ctx.fillStyle=kind==='food'?'#00c65a33':'#168bff33';
+  for(const poly of [...polygons[kind],...(kind===mode.value&&pending.length?[pending]:[])]){
+   ctx.beginPath();poly.forEach(([x,y],i)=>i?ctx.lineTo(x*canvas.width,y*canvas.height):ctx.moveTo(x*canvas.width,y*canvas.height));
+   if(poly!==pending){ctx.closePath();ctx.fill();}ctx.stroke();
+   for(const [x,y] of poly){ctx.beginPath();ctx.arc(x*canvas.width,y*canvas.height,canvas.width/220,0,2*Math.PI);ctx.fill();}
+  }
+ }
+ status.textContent=(maskSpec?'모델 음식 마스크 · ':'음식 '+polygons.food.length+'개 · ')+'접시 '+polygons.base.length+'개 · 현재 점 '+pending.length+'개';
+}
+img.onload=()=>{canvas.width=img.width;canvas.height=img.height;draw();};
+img.src='data:image/jpeg;base64,__IMAGE_DATA__';
+canvas.addEventListener('click',e=>{const r=canvas.getBoundingClientRect();pending.push([(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height]);draw();});
+document.getElementById('finish').onclick=()=>{if(pending.length<3){status.textContent='꼭짓점을 3개 이상 지정하세요.';return;}polygons[mode.value].push(pending);pending=[];draw();};
+document.getElementById('undo').onclick=()=>{pending.pop();draw();};
+document.getElementById('clear').onclick=()=>{polygons[mode.value]=[];pending=[];if(mode.value==='food'){maskSpec=null;maskOverlay=null;segmentation=null;}draw();};
+mode.onchange=()=>{pending=[];draw();};
+document.getElementById('download').onclick=()=>{
+ if(pending.length||(!maskSpec&&!polygons.food.length)||!polygons.base.length){status.textContent='음식과 접시 영역을 각각 완성하세요.';return;}
+ const numeric=id=>document.getElementById(id).value===''?null:Number(document.getElementById(id).value);
+ const data={schemaVersion:1,frameFingerprint:'__FRAME_FINGERPRINT__',coordinateSpace:'cpu_image_normalized',foodName:document.getElementById('name').value,
+ foodPolygons:polygons.food,basePolygons:polygons.base,scaleGrams:numeric('scale'),densityGPerMl:numeric('density'),densitySource:document.getElementById('source').value||null};
+ if(maskSpec){data.foodMask={...maskSpec,reviewed:true};data.segmentation=segmentation;}
+ const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
+ const link=document.createElement('a');link.href=url;link.download='annotation.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+document.getElementById('import').onchange=async e=>{
+ try{
+  const file=e.target.files[0];if(!file)return;
+  if(file.size>28000000)throw Error('파일 크기를 확인하세요.');
+  const data=JSON.parse(await file.text());
+  if(data.schemaVersion!==1||data.frameFingerprint!=='__FRAME_FINGERPRINT__'||data.coordinateSpace!=='cpu_image_normalized')throw Error('같은 AR 프레임의 영역 파일을 선택하세요.');
+  const validate=items=>Array.isArray(items)&&items.every(p=>Array.isArray(p)&&p.length>=3&&p.every(v=>Array.isArray(v)&&v.length===2&&v.every(n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1)));
+  if(!validate(data.basePolygons??[])||!validate(data.foodPolygons??[]))throw Error('영역 좌표를 확인하세요.');
+  let overlay=null;
+  if(data.foodMask){
+   const m=data.foodMask;
+   if(m.encoding!=='png_base64'||m.width!==canvas.width||m.height!==canvas.height||typeof m.data!=='string')throw Error('마스크와 사진 크기가 다릅니다.');
+   const picture=new Image();picture.src='data:image/png;base64,'+m.data;await picture.decode();
+   if(picture.width!==canvas.width||picture.height!==canvas.height)throw Error('마스크 해상도가 다릅니다.');
+   overlay=document.createElement('canvas');overlay.width=picture.width;overlay.height=picture.height;
+   const brush=overlay.getContext('2d');brush.drawImage(picture,0,0);
+   const raster=brush.getImageData(0,0,overlay.width,overlay.height);
+   for(let i=0;i<raster.data.length;i+=4){
+    const value=raster.data[i];
+    if((value!==0&&value!==255)||raster.data[i+1]!==value||raster.data[i+2]!==value||raster.data[i+3]!==255)throw Error('흑백 마스크를 선택하세요.');
+    raster.data[i]=0;raster.data[i+1]=210;raster.data[i+2]=90;raster.data[i+3]=value?110:0;
+   }
+   brush.putImageData(raster,0,0);
+  }
+  maskSpec=data.foodMask??null;maskOverlay=overlay;segmentation=data.segmentation??null;
+  polygons.food=maskSpec?[]:data.foodPolygons??[];polygons.base=data.basePolygons??[];pending=[];
+  for(const [id,key] of [['name','foodName'],['scale','scaleGrams'],['density','densityGPerMl'],['source','densitySource']])document.getElementById(id).value=data[key]??'';
+  draw();
+ }catch(error){status.textContent=error.message;}
+};
+</script></html>

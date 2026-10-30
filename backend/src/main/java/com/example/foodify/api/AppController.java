@@ -44,8 +44,9 @@ public class AppController {
     public Object create(Principal p,@RequestHeader("Idempotency-Key") String key,@RequestParam long eatenAt,@RequestParam(defaultValue="{}") String captureInfo,@RequestPart("images") List<MultipartFile> images) throws Exception {
         AiConsent.require(db,p.getName());
         if(key.isBlank()||key.length()>100||images.isEmpty()||images.size()>3||eatenAt<=0||eatenAt>System.currentTimeMillis()+86400000) throw ApiError.bad("INVALID_UPLOAD");
-        if(captureInfo.length()>10000 || !json.read(captureInfo).isObject()) throw ApiError.bad("INVALID_CAPTURE");
-        captureInfo = json.write(com.example.foodify.ai.CaptureEvidence.normalize(json.read(captureInfo),images.size()));
+        if(captureInfo.length()>64000 || !json.read(captureInfo).isObject()) throw ApiError.bad("INVALID_CAPTURE");
+        captureInfo = json.write(com.example.foodify.ai.CaptureEvidence.normalizeForStorage(json.read(captureInfo),images.size()));
+        if(captureInfo.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>64000) throw ApiError.bad("INVALID_CAPTURE");
         var saved=new ArrayList<String>();
         try {
             for(var file:images) saved.add(photos.save(file));

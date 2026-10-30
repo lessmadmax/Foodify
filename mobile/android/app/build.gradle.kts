@@ -9,6 +9,8 @@ plugins {
 
 dependencies {
     implementation("com.google.ar:core:1.48.0")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
+    implementation("com.google.code.gson:gson:2.13.2")
     testImplementation("junit:junit:4.13.2")
 }
 
@@ -25,16 +27,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_11.toString()
-    }
-
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.foodify"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = 26
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -63,4 +61,10 @@ gradle.taskGraph.whenReady {
 
 flutter {
     source = "../.."
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
+    }
 }

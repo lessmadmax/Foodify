@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 import '../core/api.dart';
 import 'ai_consent.dart';
+import 'chat_markdown.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
@@ -172,7 +173,7 @@ class _ChatState extends ConsumerState<ChatScreen> with WidgetsBindingObserver {
             style: const TextStyle(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 6),
-          SelectableText(text),
+          if (user) SelectableText(text) else ChatMarkdown(data: text),
         ],
       ),
     ),

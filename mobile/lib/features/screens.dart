@@ -12,6 +12,8 @@ import '../core/meal_review.dart';
 import 'nutrition_table.dart';
 import 'ai_consent.dart';
 import 'chat_screen.dart';
+import 'local_model_screen.dart';
+import 'food_region_screen.dart';
 
 String date(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
@@ -583,6 +585,13 @@ class SettingsScreen extends StatelessWidget {
           leading: const Icon(Icons.developer_mode),
           children: [
             ListTile(
+              title: const Text('기기 내 음식 분석 · Gemma'),
+              subtitle: const Text('모델 불러오기 · 사진 분석 · 실행 시간 확인'),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const LocalModelScreen()),
+              ),
+            ),
+            ListTile(
               title: const Text('AR 지원 확인'),
               onTap: () async {
                 final result = await ArCapabilities.check();
@@ -630,6 +639,7 @@ class CaptureScreen extends ConsumerStatefulWidget {
 }
 
 class _CaptureState extends ConsumerState<CaptureScreen> {
+  final regionDrafts = <String, Map<String, dynamic>>{};
   final paths = <String>[];
   bool busy = false;
   PendingUpload? saved;
@@ -714,6 +724,14 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
     try {
       final api = ref.read(apiProvider);
       if (!await ensureAiConsent(context, api)) return;
+      captureInfo['regionDrafts'] = [
+        for (var i = 0; i < paths.length; i++)
+          if (regionDrafts.containsKey(paths[i]))
+            {...regionDrafts[paths[i]]!, 'imageIndex': i},
+      ];
+      if (jsonEncode(captureInfo).length > 60000) {
+        throw StateError('영역의 꼭짓점 수를 줄인 뒤 다시 저장해 주세요.');
+      }
       saved ??= await PendingUpload.save(
         (await api.storage.read(key: 'member'))!,
         paths,
@@ -756,6 +774,37 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
       ),
       gap(),
       if (arInfo != null) Text(arInfo!),
+      if (paths.isNotEmpty && saved == null)
+        for (var i = 0; i < paths.length; i++)
+          TextButton.icon(
+            icon: const Icon(Icons.gesture),
+            label: Text(
+              '사진 ${i + 1} 음식 영역 보정${regionDrafts.containsKey(paths[i]) ? ' · 적용됨' : ''}',
+            ),
+            onPressed: busy
+                ? null
+                : () async {
+                    final path = paths[i];
+                    final result = await Navigator.of(context)
+                        .push<Map<String, dynamic>>(
+                          MaterialPageRoute(
+                            builder: (_) => FoodRegionScreen(
+                              path: path,
+                              initial: regionDrafts[path],
+                            ),
+                          ),
+                        );
+                    if (mounted && result != null && paths.contains(path)) {
+                      setState(() {
+                        if (result['clear'] == true) {
+                          regionDrafts.remove(path);
+                        } else {
+                          regionDrafts[path] = result;
+                        }
+                      });
+                    }
+                  },
+          ),
       OutlinedButton.icon(
         onPressed:
             paths.length >= 3 ||
@@ -784,6 +833,7 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
               ? null
               : () => setState(() {
                   paths.clear();
+                  regionDrafts.clear();
                   arInfo = null;
                   captureInfo = {
                     'method': 'guided_photos',
