@@ -35,3 +35,10 @@ capture_info는 식단에 저장되며 재분석에도 사용한다. 앱 전송 
 
 요청 형식 참고: [OpenAI 공식 이미지 입력 문서](https://developers.openai.com/api/docs/guides/images-vision).
 모델은 기존 gpt-4o-mini를 유지한다.
+
+## 2026-11-04 서버 AR 요약 검증 변경
+
+- 깊이 지연(`depthAgeMs`)은 거부 조건에서 제외하고 저장·분석용으로만 기록한다. 음수이거나 60,000ms를 넘는 값만 비정상 시각으로 보고 제외한다. 서버에 전달되는 값은 장면 깊이 중앙값뿐이며, 앱 v3(`ArTiming.MAX_SOURCE_AGE_MS=1500`)과 달리 남아 있던 100ms 기준이 대부분의 AR 촬영을 거부하던 문제를 해소한다.
+- 신뢰 깊이 비율 5% 미만, 사진·프레임 시각 차이 50ms 초과, 필드 누락·범위 오류, 사진 수 불일치는 업로드 전체를 `INVALID_CAPTURE`로 거부하지 않는다. AR 요약만 제외하고 `method=guided_photos`로 사진 분석을 진행하며, 사유를 `arExcluded.reasons`(`LOW_DEPTH_CONFIDENCE`, `CAMERA_TIMING`, `INVALID_AR_FIELDS`, `IMAGE_MISMATCH`)에 저장한다.
+- 기존 S23 실측 11건 대입 결과: 깊이 요약 전달 2건 → 7건, 나머지 4건(쿠키-B·C, 밥-A·B)은 신뢰 깊이 부족으로 사진 분석으로 전환된다.
+- 부피 계산의 픽셀 정합 판정은 앱 v3 알고리즘이 별도로 수행하며 이 변경의 영향을 받지 않는다.

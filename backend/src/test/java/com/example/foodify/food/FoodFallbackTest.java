@@ -80,6 +80,26 @@ class FoodFallbackTest {
         db.update("INSERT INTO nutrition_source_rows SELECT dataset_id,99,version_id,raw_json FROM nutrition_source_rows WHERE row_number=1");
         assertThat(foods.search("무청김치").getFirst().get("sampleCount")).isEqualTo(2);
     }
+    @Test void arVolumeUsesMajorCategoryDensityAndSurvivesUnchangedSave() {
+        assertThat(categories.majorOf("rice")).isEqualTo("밥류");
+        assertThat(categories.majorOf("a")).isEqualTo("김치류");
+        assertThat(DensityGroups.of("밥류").density()).isEqualByComparingTo("0.73");
+        assertThat(DensityGroups.of("없는분류").id()).isEqualTo("DEFAULT");
+        db.update("INSERT INTO members(id,email,password_hash,goals,created_at) VALUES('ar-user','ar@test.invalid','unused','{}',0)");
+        db.update("INSERT INTO meals VALUES('ar-meal','ar-user','test',0,'INCOMPLETE',0,'[]','{}',0)");
+        var result=meals.update("ar-user","ar-meal",0,json.read("[{\"name\":\"김치볶음밥\",\"grams\":250,\"foodId\":\"rice\",\"arMeasurement\":{\"volumeMl\":100,\"qualityHold\":true,\"holdReasons\":[\"기준면 불안정\"]}}]"));
+        var item=((com.fasterxml.jackson.databind.JsonNode)result.get("items")).get(0);
+        assertThat(item.path("grams").decimalValue()).isEqualByComparingTo("73.0");
+        assertThat(item.path("weightMeasurement").path("densityGroup").asText()).isEqualTo("RICE");
+        assertThat(item.path("weightMeasurement").path("qualityHold").asBoolean()).isTrue();
+        assertThat(item.path("nutrition").path("kcal").decimalValue()).isEqualByComparingTo("146.00");
+        assertThat(result.get("status")).isEqualTo("COMPLETE");
+        var again=meals.update("ar-user","ar-meal",1,json.read("[{\"name\":\"김치볶음밥\",\"grams\":73.0,\"foodId\":\"rice\"}]"));
+        assertThat(((com.fasterxml.jackson.databind.JsonNode)again.get("items")).get(0).path("weightMeasurement").path("method").asText()).isEqualTo("AR_VOLUME");
+        var edited=meals.update("ar-user","ar-meal",2,json.read("[{\"name\":\"김치볶음밥\",\"grams\":90,\"foodId\":\"rice\"}]"));
+        assertThat(((com.fasterxml.jackson.databind.JsonNode)edited.get("items")).get(0).has("weightMeasurement")).isFalse();
+        assertThatThrownBy(()->meals.update("ar-user","ar-meal",3,json.read("[{\"name\":\"김치볶음밥\",\"foodId\":\"rice\",\"arMeasurement\":{\"volumeMl\":-1}}]"))).hasMessageContaining("INVALID_AR_VOLUME");
+    }
     @Test void explicitSaveUpgradesOldServerMarkedFallbackButNotManualSelection() {
         db.update("INSERT INTO members(id,email,password_hash,goals,created_at) VALUES('category-user','category@test.invalid','unused','{}',0)");
         String previous="[{\"name\":\"무청김치\",\"grams\":50,\"foodId\":\"a\",\"source\":{\"matchType\":\"CATEGORY_FALLBACK\"}}]";

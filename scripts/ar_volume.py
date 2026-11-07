@@ -119,26 +119,52 @@ def fit_plane(points):
     return normal, offset, rmse, float(best.mean())
 
 
+def timing_reasons(meta):
+    frame_time = int(meta["frameTimestampNs"])
+    depth_time = int(meta["depthTimestampNs"])
+    confidence_time = int(meta["confidenceTimestampNs"])
+    image_time = int(meta["cameraTimestampNs"])
+    reasons = []
+    if meta.get("trackingState") != "TRACKING":
+        reasons.append("카메라 추적 불안정")
+    if min(frame_time, depth_time, confidence_time, image_time) <= 0:
+        reasons.append("촬영 시각 정보 확인 필요")
+    if abs(frame_time-image_time)/1e6 > 50:
+        reasons.append("사진과 AR 프레임 시간차 초과")
+    if not -5 <= (frame_time-depth_time)/1e6 <= 1500:
+        reasons.append("깊이 원본 관측 시각의 허용 범위 초과")
+    pair = meta.get("pairAcquisition") == "same_arcore_frame" or ("cameraPlanes" in meta and "gpuIntrinsics" in meta)
+    if pair:
+        if min(abs(confidence_time-image_time), abs(confidence_time-depth_time))/1e6 > 50:
+            reasons.append("신뢰도 영상의 프레임 대응 확인 필요")
+    elif depth_time != confidence_time:
+        reasons.append("깊이·신뢰도의 동일 프레임 획득 근거 확인 필요")
+    return reasons
+
+
 def estimate(meta, depth, confidence, annotation):
     if annotation.get("schemaVersion") != 1 or annotation.get("coordinateSpace") != "cpu_image_normalized":
         raise ValueError("원본 사진 좌표의 영역 지정 파일이 필요합니다.")
     points, uv = points_from_depth(meta, depth)
     mask_spec = annotation.get("foodMask")
-    method = "segmented_mask_depth_mesh_v1" if mask_spec is not None else "manual_mask_depth_mesh_v1"
+    method = "segmented_mask_depth_mesh_v3" if mask_spec is not None else "registered_raw_depth_mesh_v3"
     food = (sample_mask(decode_mask(mask_spec, meta["cpuIntrinsics"]["imageDimensions"]), uv)
             if mask_spec is not None else polygon_mask(uv, annotation.get("foodPolygons", [])))
     base = polygon_mask(uv, annotation.get("basePolygons", []))
     if not food.any() or not base.any():
-        raise ValueError("음식 영역과 접시 기준면을 각각 지정하세요.")
-    if np.any(food & base):
-        raise ValueError("음식 영역과 기준면이 겹칩니다.")
+        raise ValueError("음식 영역과 접시 영역을 각각 지정하세요.")
+    excluded_food_pixels = int((food & base).sum())
+    base = base & ~food
     valid = (depth > 0) & (confidence >= 128) & (uv >= 0).all(axis=-1) & (uv <= 1).all(axis=-1)
+    selection = {"algorithmVersion": 3, "baseSelectionPolicy": "selected_plate_minus_food",
+                 "excludedFoodPixelCount": excluded_food_pixels,
+                 "baseCandidatePixelCount": int(base.sum()), "validBasePixelCount": int((base & valid).sum())}
     try:
         normal, offset, rmse, inlier_ratio = fit_plane(points[base & valid])
     except ValueError as error:
         return {
-            "schemaVersion": 1, "method": method, "volumeValidated": False,
-            "status": "REVIEW_REQUIRED", "holdReasons": [str(error)],
+            "schemaVersion": 1, "method": method, "volumeValidated": False, **selection,
+            "status": "REVIEW_REQUIRED", "holdReasons": timing_reasons(meta) + (["음식을 제외한 접시 표면이 없습니다. 음식 주변의 접시 영역을 넓게 지정해 주세요."] if not base.any() else []) + (["음식 유효 깊이 비율 80% 미만"] if float(valid[food].mean()) < .8 else []) + [str(error)],
             "foodName": annotation.get("foodName", ""), "observedVolumeMl": None,
             "volumeMl": None, "estimatedGrams": None,
             "validFoodPixelFraction": float(valid[food].mean()),
@@ -148,14 +174,7 @@ def estimate(meta, depth, confidence, annotation):
     reasons = []
     if mask_spec is not None and mask_spec.get("reviewed") is not True:
         reasons.append("생성된 음식 경계 검토 필요")
-    if meta.get("trackingState") != "TRACKING":
-        reasons.append("카메라 추적 불안정")
-    frame_time = int(meta["frameTimestampNs"])
-    for key, limit in (("depthTimestampNs", 100), ("cameraTimestampNs", 50), ("confidenceTimestampNs", 100)):
-        if abs(frame_time - int(meta[key])) / 1e6 > limit:
-            reasons.append(key + " 시간차 초과")
-    if int(meta["depthTimestampNs"]) != int(meta["confidenceTimestampNs"]):
-        reasons.append("깊이와 신뢰도 시각 불일치")
+    reasons.extend(timing_reasons(meta))
     tilt = math.degrees(math.acos(float(np.clip(abs(normal[2]), 0, 1))))
     if tilt > 30:
         reasons.append("상단 촬영 권장 각도(30도) 초과")
@@ -204,7 +223,7 @@ def estimate(meta, depth, confidence, annotation):
     if scale is not None and (isinstance(scale, bool) or not isinstance(scale, (float, int)) or not math.isfinite(scale) or scale <= 0):
         raise ValueError("전자저울 중량은 양수여야 합니다.")
     return {
-        "schemaVersion": 1, "method": method, "volumeValidated": False,
+        "schemaVersion": 1, "method": method, "volumeValidated": False, **selection,
         "status": "REVIEW_REQUIRED" if reasons else "EXPERIMENT_ESTIMATE",
         "holdReasons": reasons, "foodName": annotation.get("foodName", ""),
         "observedVolumeMl": round(volume, 3),

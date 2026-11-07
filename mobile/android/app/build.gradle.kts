@@ -8,6 +8,7 @@ plugins {
 }
 
 dependencies {
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
     implementation("com.google.ar:core:1.48.0")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
     implementation("com.google.code.gson:gson:2.13.2")

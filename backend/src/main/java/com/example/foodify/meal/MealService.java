@@ -1,5 +1,7 @@
 package com.example.foodify.meal;
 import com.example.foodify.api.*;
+import com.example.foodify.food.DensityGroups;
+import com.example.foodify.food.FoodCategoryService;
 import com.example.foodify.food.FoodService;
 import com.example.foodify.storage.PhotoStore;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -13,8 +15,30 @@ import java.util.*;
 public class MealService {
     @org.springframework.beans.factory.annotation.Value("${app.worker-enabled:true}")
     private boolean workerEnabled;
-    private final JdbcTemplate db; private final Json json; private final FoodService foods;
-    public MealService(JdbcTemplate db,Json json,FoodService foods) {this.db=db;this.json=json;this.foods=foods;}
+    private final JdbcTemplate db; private final Json json; private final FoodService foods; private final FoodCategoryService categories;
+    public MealService(JdbcTemplate db,Json json,FoodService foods,FoodCategoryService categories) {this.db=db;this.json=json;this.foods=foods;this.categories=categories;}
+    /**
+     * AR weight: the app sends only the measured volume; the server picks the density from the
+     * matched food's official major category (DensityGroups) and computes grams.
+     */
+    private Map<String,Object> applyArMeasurement(JsonNode ar,com.fasterxml.jackson.databind.node.ObjectNode input) {
+        double volume=ar.path("volumeMl").asDouble(Double.NaN);
+        if(!(volume>0 && volume<=5000)) throw ApiError.bad("INVALID_AR_VOLUME");
+        var resolved=foods.calculate(input);
+        String foodId=Objects.toString(resolved.get("foodId"),"");
+        String major=categories.majorOf(foodId);
+        var group=DensityGroups.of(major);
+        var grams=java.math.BigDecimal.valueOf(volume).multiply(group.density()).setScale(1,java.math.RoundingMode.HALF_UP).max(new java.math.BigDecimal("0.1"));
+        input.put("grams",grams); input.put("foodId",foodId);
+        var reasons=new ArrayList<String>();
+        for(var r:ar.path("holdReasons")) if(r.isTextual() && reasons.size()<10) reasons.add(r.asText().substring(0,Math.min(200,r.asText().length())));
+        var m=new LinkedHashMap<String,Object>();
+        m.put("method","AR_VOLUME"); m.put("volumeMl",volume); m.put("qualityHold",ar.path("qualityHold").asBoolean(false));
+        m.put("holdReasons",reasons); m.put("majorCategory",major); m.put("densityGroup",group.id()); m.put("densityGroupLabel",group.label());
+        m.put("densityGPerMl",group.density()); m.put("densityBasis",group.basis()); m.put("densitySource","FAO/INFOODS Density Database v2.0");
+        m.put("volumeValidated",false); m.put("measuredAt",System.currentTimeMillis());
+        return m;
+    }
     public Map<String,Object> get(String member,String id) {
         var rows=db.queryForList("SELECT * FROM meals WHERE member_id=? AND id=?",member,id);
         if(rows.isEmpty()) throw ApiError.missing();
@@ -61,13 +85,17 @@ public class MealService {
                 !item.path("foodId").asText().startsWith("category:") && calculationInput.isObject()) {
                 ((com.fasterxml.jackson.databind.node.ObjectNode)calculationInput).put("foodId",""); break;
             }
+            Map<String,Object> measurement=null;
+            if(item.path("arMeasurement").isObject() && calculationInput.isObject())
+                measurement=applyArMeasurement(item.get("arMeasurement"),(com.fasterxml.jackson.databind.node.ObjectNode)calculationInput);
             var calculated=foods.calculate(calculationInput);
+            if(measurement!=null) {calculated.put("weightMeasurement",measurement);computed.add(calculated);return;}
             // Preserve server-generated evidence only for an unambiguous unchanged food/weight.
             var matching=new ArrayList<JsonNode>();
             for(var old:previous) if(old.path("name").asText().equals(item.path("name").asText()) &&
                 ((old.path("grams").isNull() && item.path("grams").isNull()) ||
                  (old.path("grams").isNumber() && item.path("grams").isNumber() && old.path("grams").decimalValue().compareTo(item.path("grams").decimalValue())==0))) matching.add(old);
-            if(matching.size()==1) for(String field:List.of("weightEstimate","uncertainty")) {
+            if(matching.size()==1) for(String field:List.of("weightEstimate","uncertainty","weightMeasurement")) {
                 if(matching.getFirst().has(field)) calculated.put(field,matching.getFirst().get(field));
             }
             computed.add(calculated);

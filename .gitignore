@@ -21,3 +21,5 @@ data/private/
 data/nutrition/raw/
 data/nutrition/processed/
 scripts/__pycache__/
+
+/mobile/android/app/src/main/assets/food101/food101.onnx

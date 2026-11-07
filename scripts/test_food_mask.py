@@ -49,7 +49,7 @@ class FoodMaskTest(unittest.TestCase):
         annotation["foodPolygons"] = []
         result = estimate(meta, depth, confidence, annotation)
         self.assertEqual(result["volumeMl"], baseline["volumeMl"])
-        self.assertEqual(result["method"], "segmented_mask_depth_mesh_v1")
+        self.assertEqual(result["method"], "segmented_mask_depth_mesh_v3")
 
     def test_unreviewed_mask_is_held(self):
         meta, depth, confidence, annotation = fixture()
@@ -61,11 +61,12 @@ class FoodMaskTest(unittest.TestCase):
         self.assertIn("생성된 음식 경계 검토 필요", result["holdReasons"])
         self.assertGreater(result["observedVolumeMl"], 0)
 
-    def test_mask_support_overlap_is_rejected(self):
+    def test_mask_covering_all_support_is_held(self):
         meta, depth, confidence, annotation = fixture()
         annotation["foodMask"] = encode_mask(np.ones((80, 80), dtype=bool), "test")
-        with self.assertRaisesRegex(ValueError, "겹칩니다"):
-            estimate(meta, depth, confidence, annotation)
+        result = estimate(meta, depth, confidence, annotation)
+        self.assertIsNone(result["volumeMl"])
+        self.assertEqual(result["baseCandidatePixelCount"], 0)
 
 
 if __name__ == "__main__":

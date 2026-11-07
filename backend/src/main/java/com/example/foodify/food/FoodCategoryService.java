@@ -48,6 +48,23 @@ public class FoodCategoryService {
         if(token.length()<2 || token.contains("및") || token.contains("/")) return;
         groups.computeIfAbsent(key,k->new Group(k,label,token,depth,new LinkedHashSet<>())).members().add(id);
     }
+    /** Official major category (식품대분류명) of a food or synthetic category id, or null. */
+    public String majorOf(String foodId) {
+        if(foodId==null || foodId.isBlank()) return null;
+        if(foodId.startsWith("category:")) {
+            for(var g:groups()) if(foodId.equals("category:"+digest(g.key()))) {
+                String[] parts=g.key().split("/");
+                return parts.length>1?parts[1]:null; // major/<major> or representative/<major>/<rep>
+            }
+            return null;
+        }
+        var rows=db.queryForList("SELECT r.raw_json FROM food_nutrition_versions v JOIN nutrition_source_rows r ON r.version_id=v.id WHERE v.food_id=? ORDER BY v.source_date DESC,v.id,r.dataset_id,r.row_number",String.class,foodId);
+        for(String raw:rows) {
+            String major=clean(json.read(raw).path("식품대분류명").asText(""));
+            if(!major.isEmpty()) return major;
+        }
+        return null;
+    }
     public Map<String,Object> fallback(String name) {
         String normalized=FoodSearchTerms.normalize(name);
         var matches=groups().stream().filter(g->normalized.endsWith(g.term()) || normalized.equals(FoodSearchTerms.normalize(g.label())))

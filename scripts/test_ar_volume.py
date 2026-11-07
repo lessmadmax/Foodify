@@ -69,18 +69,45 @@ class VolumeTest(unittest.TestCase):
         meta["depthTimestampNs"] = "800000000"
         result = estimate(meta, depth, confidence, annotation)
         self.assertIsNone(result["volumeMl"])
-        self.assertTrue(any("시각 불일치" in reason for reason in result["holdReasons"]))
+        self.assertTrue(any("동일 프레임 획득 근거" in reason for reason in result["holdReasons"]))
+
+    def test_known_same_frame_pair_accepts_reprojection_timestamp(self):
+        meta, depth, confidence, annotation = fixture()
+        meta["pairAcquisition"] = "same_arcore_frame"
+        meta["depthTimestampNs"] = "900000000"
+        result = estimate(meta, depth, confidence, annotation)
+        self.assertIsNotNone(result["volumeMl"])
+
+    def test_known_pair_still_rejects_stale_confidence(self):
+        meta, depth, confidence, annotation = fixture()
+        meta["pairAcquisition"] = "same_arcore_frame"
+        meta["confidenceTimestampNs"] = "700000000"
+        result = estimate(meta, depth, confidence, annotation)
+        self.assertIsNone(result["volumeMl"])
+        self.assertTrue(any("프레임 대응" in reason for reason in result["holdReasons"]))
 
     def test_below_support_surface_is_held(self):
         meta, depth, confidence, annotation = fixture()
         depth[30:50, 30:50] = 520
         self.assertIsNone(estimate(meta, depth, confidence, annotation)["volumeMl"])
 
-    def test_overlapping_annotations_rejected(self):
+    def test_whole_plate_excludes_food(self):
+        meta, depth, confidence, annotation = fixture()
+        annotation["basePolygons"] = [[[.1,.1],[.9,.1],[.9,.9],[.1,.9]]]
+        result = estimate(meta, depth, confidence, annotation)
+        self.assertEqual(result["status"], "EXPERIMENT_ESTIMATE")
+        self.assertAlmostEqual(result["volumeMl"], 365.5125, places=3)
+        self.assertEqual(result["excludedFoodPixelCount"], 400)
+        self.assertEqual(result["baseCandidatePixelCount"], 3696)
+        self.assertAlmostEqual(result["basePlaneOffsetMm"], 500)
+
+    def test_plate_only_covering_food_is_held(self):
         meta, depth, confidence, annotation = fixture()
         annotation["basePolygons"] = copy.deepcopy(annotation["foodPolygons"])
-        with self.assertRaisesRegex(ValueError, "겹칩니다"):
-            estimate(meta, depth, confidence, annotation)
+        result = estimate(meta, depth, confidence, annotation)
+        self.assertIsNone(result["volumeMl"])
+        self.assertEqual(result["baseCandidatePixelCount"], 0)
+        self.assertTrue(any("음식을 제외한 접시 표면" in x for x in result["holdReasons"]))
 
     def test_cropped_and_mirrored_coordinate_mapping(self):
         meta, depth, _, _ = fixture()

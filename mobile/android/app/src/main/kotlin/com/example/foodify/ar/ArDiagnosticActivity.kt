@@ -34,6 +34,8 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
     private lateinit var surface: GLSurfaceView
     private lateinit var status: TextView
     private lateinit var metrics: TextView
+    private lateinit var guidance: TextView
+    private val motionWindow = ArGuidance.MotionWindow() // GL thread only
     private lateinit var depthView: ImageView
     private lateinit var confidenceView: ImageView
     private lateinit var recordButton: Button
@@ -52,6 +54,7 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
     private var lastSavedDirectory: String? = null
     private var savingCapture = false
     private val mealCapture get() = intent.getBooleanExtra("mealCapture", false)
+    private val researchCapture get() = intent.getBooleanExtra("researchCapture", false)
     private var plainCamera = false
 
     private class CaptureRun(val directory: File, val deadline: Long) {
@@ -60,6 +63,8 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
         var lastTimestamp = 0L
         var saved = 0 // writer thread only
         var failure: String? = null
+        val tilts = mutableListOf<Double>()      // GL thread, per captured frame
+        val speeds = mutableListOf<Double?>()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,8 +76,10 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
             setPadding(12, 12, 12, 12)
             fitsSystemWindows = true
         }
-        root.addView(text(if(mealCapture) "Foodify · 음식 촬영" else "Foodify · AR 깊이 진단", 19f))
-        root.addView(text(if(mealCapture) "음식 전체를 비추고 촬영을 누른 뒤 5초 동안 천천히 옆으로 움직여 주세요." else "약 0.5m부터 시작해 밝은 곳에서 천천히 옆으로 이동하세요. 음식량 측정 전 실험 화면입니다.", 13f))
+        root.addView(text(if(researchCapture) "Foodify · AR 중량 자료 수집" else if(mealCapture) "Foodify · 음식 촬영" else "Foodify · AR 깊이 진단", 19f))
+        root.addView(text(if(researchCapture) "촬영 규칙: ① 무광 평판 접시(유리·광택 접시·저울 상판 위 직접 X) ② 음식 바로 위에서 휴대폰 수평(10° 이내) ③ 촬영 중 5초 동안 좌우로 천천히 이동. 기울기 10° 이내일 때만 촬영할 수 있습니다."
+            else if(mealCapture) "음식 바로 위에서 휴대폰을 수평으로 들고 촬영을 누른 뒤 5초 동안 천천히 옆으로 움직여 주세요. 유리·광택 접시는 깊이가 잘 잡히지 않습니다."
+            else "약 0.5m부터 시작해 밝은 곳에서 천천히 옆으로 이동하세요. 음식량 측정 전 실험 화면입니다.", 13f))
         status = text("카메라·AR 서비스 확인 중", 14f)
         root.addView(status)
         val cameraBox = FrameLayout(this)
@@ -87,7 +94,7 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
         root.addView(cameraBox, LinearLayout.LayoutParams(-1, 0, 1f))
         metrics = text("깊이 수집 대기", 13f)
         root.addView(metrics)
-        if (mealCapture) metrics.visibility = View.GONE
+        if (mealCapture && !researchCapture) metrics.visibility = View.GONE
         val maps = LinearLayout(this)
         fun mapColumn(title: String): ImageView {
             val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -99,10 +106,12 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
         }
         depthView = mapColumn("원본 깊이: 빨강 0.2m → 파랑 2m")
         confidenceView = mapColumn("원본 신뢰도: 검정 0 → 흰색 255")
-        if (!mealCapture) {
+        if (!mealCapture || researchCapture) {
             root.addView(maps)
             root.addView(text("지도는 센서 방향입니다. 검정 깊이=미확보. 신뢰도는 오차율이 아닙니다.", 11f))
         }
+        guidance = text("", 15f)
+        root.addView(guidance)
         recordButton = Button(this).apply {
             text = if(mealCapture) "사진 촬영 · 5초" else "5초 진단 데이터 저장"
             isEnabled = false
@@ -118,9 +127,9 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
             }
         }
         root.addView(recordButton)
-        root.addView(text(if(mealCapture) "촬영 완료 후 대표 사진과 거리 정보를 자동으로 첨부합니다. 다음 화면에서 동의 후 분석합니다." else "사진·깊이는 앱 내부에만 저장됩니다. 서버·OpenAI 전송 없음.", 11f))
+        root.addView(text(if(researchCapture) "사진·깊이를 S23 내부에 저장합니다. 촬영 후 음식 영역·접시 기준면과 전자저울 중량을 기록하세요." else if(mealCapture) "촬영 완료 후 대표 사진과 거리 정보를 자동으로 첨부합니다. 다음 화면에서 동의 후 분석합니다." else "사진·깊이는 앱 내부에만 저장됩니다. 서버·OpenAI 전송 없음.", 11f))
         val buttons = LinearLayout(this)
-        if (mealCapture) buttons.addView(Button(this).apply {
+        if (mealCapture && !researchCapture) buttons.addView(Button(this).apply {
             text = "일반 사진으로 촬영"
             setOnClickListener { if (!savingCapture) { plainCamera = true; finish() } }
         }, LinearLayout.LayoutParams(0, -2, 1f))
@@ -248,8 +257,10 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
             lastUi = now
             if (frame.camera.trackingState != TrackingState.TRACKING) {
                 val failureReason = frame.camera.trackingFailureReason.toString()
+                motionWindow.clear()
                 runOnUiThread {
                     if (!isDestroyed) {
+                        guidance.text = ""
                         status.text = "추적 대기: $failureReason · 밝은 곳에서 천천히 이동하세요."
                         metrics.text = "추적이 안정되면 깊이를 표시합니다."
                         recordButton.isEnabled = false
@@ -308,27 +319,46 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
                 val depthBitmap = depthBitmap(d, depth.width, depth.height)
                 val colors = IntArray(c.size) { i -> val value = c[i].toInt() and 255; Color.rgb(value,value,value) }
                 val confidenceBitmap = Bitmap.createBitmap(colors,depth.width,depth.height,Bitmap.Config.ARGB_8888)
+                val pose = frame.camera.pose
+                val tilt = ArGuidance.tiltDegrees(pose.zAxis)
+                motionWindow.add(now, pose.translation)
+                val speed = motionWindow.speed()
                 val run = recording
+                val advice = ArGuidance.advise(tilt, speed, recording = run != null)
                 if (run != null && run.count < 10 && now - run.lastSampleTime >= 500 &&
-                    depth.timestamp != run.lastTimestamp && stats.confident > 0) {
+                    depth.timestamp != run.lastTimestamp && stats.valid > 0) {
                     try {
-                        capture(frame, depth, confidence.timestamp, d, c, stats, run)
+                        capture(frame, depth, confidence.timestamp, d, c, stats, run, tilt, speed, advice)
                         run.lastTimestamp = depth.timestamp
                         run.lastSampleTime = now
                     } catch (_: NotYetAvailableException) { /* wait for a matching CPU image */ }
                 }
-                val message = String.format(Locale.KOREA,
+                var centerPoints=0;var centerValid=0
+                for(yy in maxOf(0,cy-depth.height/10)..minOf(depth.height-1,cy+depth.height/10))for(xx in maxOf(0,cx-depth.width/10)..minOf(depth.width-1,cx+depth.width/10)) {
+                    centerPoints++;val ii=yy*depth.width+xx
+                    if(DepthData.millimetres(d,ii)>0 && (c[ii].toInt() and 255)>=128)centerValid++
+                }
+                val centerHint=if(centerValid==0) "중앙 깊이 부족 · 대상을 중앙에 두고 밝은 곳에서 천천히 옆으로 움직이세요." else "중앙 주변 유효 깊이 $centerValid/$centerPoints · 촬영 후 음식 영역 품질을 확인합니다."
+                val message = centerHint+"\n"+String.format(Locale.KOREA,
                     "중앙 깊이(Z): %s · 평면 %d개\n유효 %.1f%% · 신뢰도 ≥128 %.1f%% · %d×%d\n새 깊이 이후 %dms · %s",
                     center?.let { "$it mm" } ?: "미확보", planes,
                     100.0*stats.valid/stats.total, 100.0*stats.confident/stats.total,
                     depth.width,depth.height, now-lastNewDepthTime, if(fresh) "새 데이터" else "이전 깊이 재투영")
+                val speedText = speed?.let { String.format(Locale.KOREA, "%.1f cm/s", it * 100) } ?: "측정 중"
+                val guidanceText = if (advice.messages.isEmpty())
+                    String.format(Locale.KOREA, "✓ 기울기 %.0f° · 이동 %s", tilt, speedText)
+                else advice.messages.joinToString("\n")
+                // Research data must follow the capture rule; normal meal capture only warns.
+                val tiltGate = !researchCapture || advice.tiltOk
                 runOnUiThread {
                     if (!isDestroyed && resumed) {
                         status.text = "추적 정상 · 거리·부피 정확도 검증 전"
                         metrics.text = message
+                        guidance.text = guidanceText
+                        guidance.setTextColor(if (advice.messages.isEmpty()) Color.rgb(120, 220, 120) else Color.rgb(255, 200, 80))
                         depthView.setImageBitmap(depthBitmap)
                         confidenceView.setImageBitmap(confidenceBitmap)
-                        if (run == null && recordButton.text != "파일 저장 중…") recordButton.isEnabled = stats.confident > 0
+                        if (run == null && recordButton.text != "파일 저장 중…") recordButton.isEnabled = stats.valid > 0 && tiltGate
                     }
                 }
             }
@@ -346,9 +376,19 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
 
     @Suppress("DEPRECATION")
     private fun capture(frame: Frame, depth: Image, confidenceTimestamp: Long, d: ByteArray, c: ByteArray,
-                        stats: DepthData.Stats, run: CaptureRun) {
+                        stats: DepthData.Stats, run: CaptureRun, tilt: Double, speed: Double?,
+                        advice: ArGuidance.Advice) {
         frame.acquireCameraImage().use { cameraImage ->
             val files = linkedMapOf("depth.u16le" to d, "confidence.u8" to c)
+            var fullTimestamp:Long?=null
+            var fullWidth:Int?=null;var fullHeight:Int?=null
+            var fullError:String?=null
+            try {
+                frame.acquireDepthImage16Bits().use {full ->
+                    files["full-depth.u16le"]=planeBytes(full,2)
+                    fullTimestamp=full.timestamp;fullWidth=full.width;fullHeight=full.height
+                }
+            } catch(e:Exception) {fullError=e.javaClass.simpleName}
             val planeInfo = JSONArray()
             cameraImage.planes.forEachIndexed { i, p ->
                 val w = if(i == 0) cameraImage.width else (cameraImage.width+1)/2
@@ -367,6 +407,11 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
             frame.transformCoordinates2d(Coordinates2d.TEXTURE_NORMALIZED,corners,
                 Coordinates2d.IMAGE_NORMALIZED,imageCorners)
             val meta = JSONObject().put("schemaVersion",1)
+                .put("pairAcquisition","same_arcore_frame")
+                .put("depthCoordinates","gpu_texture_normalized")
+                .put("fullDepthTimestampNs",fullTimestamp?.toString() ?: JSONObject.NULL)
+                .put("fullDepthWidth",fullWidth ?: JSONObject.NULL).put("fullDepthHeight",fullHeight ?: JSONObject.NULL)
+                .put("fullDepthError",fullError ?: JSONObject.NULL)
                 .put("frameTimestampNs",frame.timestamp.toString())
                 .put("depthTimestampNs",depth.timestamp.toString())
                 .put("confidenceTimestampNs",confidenceTimestamp.toString())
@@ -389,12 +434,18 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
                 .put("cameraCrop",cameraImage.cropRect.toShortString())
                 .put("device",android.os.Build.MODEL).put("androidSdk",android.os.Build.VERSION.SDK_INT)
                 .put("volumeValidated",false)
+                .put("guidanceVersion",ArGuidance.VERSION)
+                .put("cameraTiltDegrees",tilt)
+                .put("cameraSpeedMps",speed ?: JSONObject.NULL)
+                .put("guidanceTiltOk",advice.tiltOk)
+                .put("guidanceMotion",advice.motion.name)
+            run.tilts.add(tilt); run.speeds.add(speed)
             val name = "frame-%02d".format(Locale.ROOT,run.count++)
             writer.execute {
                 try {
                     val root = File(filesDir,"ar-diagnostics")
                     val existing = if(root.exists()) root.walkTopDown().filter { it.isFile }.sumOf { it.length() } else 0L
-                    check(existing + files.values.sumOf { it.size.toLong() } < 200L*1024*1024) { "LOCAL_STORAGE_LIMIT" }
+                    check(existing + files.values.sumOf { it.size.toLong() } < 1024L*1024*1024) { "LOCAL_STORAGE_LIMIT" }
                     val dir = File(run.directory,name)
                     check(dir.mkdirs()) { "DIRECTORY_CREATE_FAILED" }
                     for((filename,bytes) in files) File(dir,filename).writeBytes(bytes)
@@ -408,6 +459,8 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
     private fun finishCapture(reason: String) {
         val run = recording ?: return
         recording = null
+        val tilts = run.tilts.toList()
+        val motions = run.speeds.map { ArGuidance.motion(it) }
         runOnUiThread { if(!isDestroyed) { recordButton.text = "파일 저장 중…"; recordButton.isEnabled = false } }
         writer.execute {
             try {
@@ -418,6 +471,12 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
                     .put("error",run.failure ?: JSONObject.NULL)
                     .put("device",android.os.Build.MODEL)
                     .put("createdAtEpochMs",System.currentTimeMillis())
+                    .put("guidanceVersion",ArGuidance.VERSION)
+                    .put("maxTiltDegrees",tilts.maxOrNull() ?: JSONObject.NULL)
+                    .put("framesWithinTilt",tilts.count { it <= ArGuidance.MAX_TILT_DEGREES })
+                    .put("framesMotionOk",motions.count { it == ArGuidance.Motion.OK })
+                    .put("framesStill",motions.count { it == ArGuidance.Motion.STILL })
+                    .put("framesFast",motions.count { it == ArGuidance.Motion.FAST })
                     .put("volumeValidated",false).toString(2))
             } catch(e: Exception) { run.failure = e.javaClass.simpleName }
             runOnUiThread {

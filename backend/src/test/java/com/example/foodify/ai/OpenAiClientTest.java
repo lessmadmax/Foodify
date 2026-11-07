@@ -36,6 +36,14 @@ class OpenAiClientTest {
         assertTrue(request.get().contains("sceneMedianDepthMm"));
         assertTrue(request.get().contains("음식 높이·부피·중량이 아니며"));
     }
+    @Test void sendsDeviceCandidatesAsEvidenceWithoutForcingSingleDish() {
+        var evidence=java.util.Map.<String,Object>of("method","gallery_photos","foodRecognition",java.util.Map.of("model","Food-101-93M","predictions",List.of(java.util.Map.of("imageIndex",0,"candidates",List.of(java.util.Map.of("label","hamburger","score",0.85))))));
+        client(2).analyze(List.of(new byte[]{1}),evidence);
+        assertTrue(request.get().contains("Food-101-93M"));
+        assertTrue(request.get().contains("hamburger"));
+        assertTrue(request.get().contains("사진에 여러 음식이 있으면 각각 구분"));
+        assertTrue(request.get().contains("후보 하나를 모든 음식에 적용하지 마세요"));
+    }
     OpenAiClient client(int limit){return new OpenAiClient("test-key","test-model","http://127.0.0.1:"+server.getAddress().getPort(),limit,json,db,tx);}
     @Test void chatSendsRolesAndFreshEvidenceWithoutExternalStorage(){
         response=json.write(java.util.Map.of("status","completed","output",List.of(java.util.Map.of("content",List.of(java.util.Map.of("type","output_text","text","{\"answer\":\"저녁 안내\"}"))))));

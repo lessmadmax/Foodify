@@ -25,7 +25,7 @@ void main() {
     expect(find.textContaining('외부 AI에 전송'), findsOneWidget);
     expect(find.byType(CheckboxListTile), findsNothing);
   });
-  testWidgets('사진 촬영은 AR을 우선 사용하고 취소 시 기존 화면 유지', (tester) async {
+  testWidgets('사진 촬영은 일반 카메라만 사용하고 AR을 호출하지 않음', (tester) async {
     const channel = MethodChannel('foodify/ar');
     final calls = <String>[];
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -45,8 +45,8 @@ void main() {
     );
     await tester.ensureVisible(find.text('사진 촬영'));
     await tester.tap(find.text('사진 촬영'));
-    await tester.pumpAndSettle();
-    expect(calls, ['capabilities', 'captureMeal']);
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, isEmpty);
     expect(find.text('사진 촬영'), findsOneWidget);
   });
   testWidgets('설정 개발자 메뉴에서 진단 실행', (tester) async {

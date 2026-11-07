@@ -11,11 +11,14 @@ import com.example.foodify.ar.ArDiagnosticActivity
 
 class MainActivity : FlutterActivity() {
     private var localModel: com.example.foodify.local.LocalModelBridge? = null
+    private var classifier: com.example.foodify.local.FoodClassifierBridge? = null
     private var segmentation: com.example.foodify.local.SegmentationBridge? = null
+    private var arResearch: com.example.foodify.ar.ArResearchBridge? = null
     private var captureResult: MethodChannel.Result? = null
     @Deprecated("Android activity result bridge")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 7403) { arResearch?.onFileResult(resultCode, data); return }
         if (requestCode == 7402) { localModel?.onFileResult(resultCode, data); return }
         if (requestCode != 7401) return
         val pending = captureResult ?: return
@@ -32,14 +35,16 @@ class MainActivity : FlutterActivity() {
     }
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        arResearch = com.example.foodify.ar.ArResearchBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         localModel = com.example.foodify.local.LocalModelBridge(this, flutterEngine.dartExecutor.binaryMessenger)
+        classifier = com.example.foodify.local.FoodClassifierBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         segmentation = com.example.foodify.local.SegmentationBridge(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "foodify/ar")
             .setMethodCallHandler { call, result ->
                 if (call.method == "captureMeal") {
                     if (captureResult != null) { result.error("AR_BUSY", "AR 촬영 중입니다.", null); return@setMethodCallHandler }
                     captureResult = result
-                    try { startActivityForResult(Intent(this, ArDiagnosticActivity::class.java).putExtra("mealCapture", true), 7401) }
+                    try { startActivityForResult(Intent(this, ArDiagnosticActivity::class.java).putExtra("mealCapture", true).putExtra("researchCapture", call.argument<Boolean>("research") == true), 7401) }
                     catch (e: Exception) { captureResult = null; result.error("AR_UNAVAILABLE", e.message, null) }
                     return@setMethodCallHandler
                 }
@@ -67,9 +72,16 @@ class MainActivity : FlutterActivity() {
                     "volumeValidated" to false, "device" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"))
             }
     }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == "com.example.foodify.DEBUG_CLASSIFY50") classifier?.evaluateBatch()
+        if (intent.action == "com.example.foodify.DEBUG_EVALUATE50") localModel?.evaluateBatch()
+    }
     override fun onDestroy() {
         localModel?.dispose()
+        classifier?.dispose()
         segmentation?.dispose()
+        arResearch?.dispose()
         super.onDestroy()
     }
 }

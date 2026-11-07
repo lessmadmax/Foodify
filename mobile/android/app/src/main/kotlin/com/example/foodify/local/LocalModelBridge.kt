@@ -61,6 +61,13 @@ class LocalModelBridge(private val activity: Activity, messenger: BinaryMessenge
                     if (path == null) result.error("IMAGE_REQUIRED", "사진을 선택해 주세요.", null)
                     else run(result) { analyze(path) }
                 }
+                "generateText" -> {
+                    val prompt = call.argument<String>("prompt")
+                    val maxTokens = call.argument<Int>("maxOutputTokens") ?: 1024
+                    if (prompt.isNullOrBlank() || prompt.length > 20000 || maxTokens !in 16..1024)
+                        result.error("INVALID_PROMPT", "지시문 또는 출력 길이를 확인해 주세요.", null)
+                    else run(result) { generateText(prompt, maxTokens) }
+                }
                 else -> result.notImplemented()
             }
         }
@@ -136,23 +143,9 @@ class LocalModelBridge(private val activity: Activity, messenger: BinaryMessenge
             bitmap.compress(Bitmap.CompressFormat.JPEG, 85, output); output.toByteArray()
         } } finally { bitmap.recycle() }
         check(!disposed)
-        val reused = engines.isLoaded
-        stage = if (reused) "준비된 모델 사용" else "모델 초기화"
-        val started = SystemClock.elapsedRealtime()
-        val engine = engines.acquire {
-            val cache = File(activity.cacheDir, "gemma4").apply { mkdirs() }
-            val candidate = Engine(EngineConfig(model.absolutePath, backend = Backend.GPU(),
-                visionBackend = Backend.GPU(), maxNumTokens = 4096, maxNumImages = 1, cacheDir = cache.path))
-            try {
-                candidate.initialize()
-                check(!disposed)
-                candidate
-            } catch (error: Throwable) {
-                runCatching { candidate.close() }
-                throw error
-            }
-        }
-        modelLoaded = true
+        val acquired = acquireEngine()
+        val engine = acquired.engine
+        val reused = acquired.reused
         // Only the engine is reused. Each image gets an isolated conversation.
         run {
             val initialized = SystemClock.elapsedRealtime()
@@ -187,10 +180,109 @@ class LocalModelBridge(private val activity: Activity, messenger: BinaryMessenge
                 val ended = SystemClock.elapsedRealtime()
                 return mapOf("foods" to FoodNames.parse(response.toString()),
                     "engineReused" to reused,
-                    "initializationMs" to (if (reused) 0L else initialized - started), "inferenceMs" to ended - initialized,
+                    "initializationMs" to acquired.initializationMs, "inferenceMs" to ended - initialized,
                     "processPssMbAfter" to android.os.Debug.getPss() / 1024.0,
                     "backend" to "GPU · 이미지 GPU", "runtime" to "LiteRT-LM 0.16.1")
             }
+        }
+    }
+
+    private class Acquired(val engine: Engine, val reused: Boolean, val initializationMs: Long)
+
+    /** Loads the GPU engine once and reuses it for image analysis and text generation. */
+    private fun acquireEngine(): Acquired {
+        val reused = engines.isLoaded
+        stage = if (reused) "준비된 모델 사용" else "모델 초기화"
+        val started = SystemClock.elapsedRealtime()
+        val engine = engines.acquire {
+            val cache = File(activity.cacheDir, "gemma4").apply { mkdirs() }
+            val candidate = Engine(EngineConfig(model.absolutePath, backend = Backend.GPU(),
+                visionBackend = Backend.GPU(), maxNumTokens = 4096, maxNumImages = 1, cacheDir = cache.path))
+            try {
+                candidate.initialize()
+                check(!disposed)
+                candidate
+            } catch (error: Throwable) {
+                runCatching { candidate.close() }
+                throw error
+            }
+        }
+        modelLoaded = true
+        return Acquired(engine, reused, if (reused) 0L else SystemClock.elapsedRealtime() - started)
+    }
+
+    /** Text-only generation (feedback timing test). Same engine, a fresh conversation per prompt. */
+    private fun generateText(prompt: String, maxTokens: Int): Map<String, Any> {
+        check(Build.VERSION.SDK_INT >= 28) { "기기 내 분석은 Android 9 이상에서 지원합니다." }
+        check(ready()) { "검증된 모델을 먼저 불러와 주세요." }
+        check(!disposed)
+        val acquired = acquireEngine()
+        stage = "문장 생성"
+        val began = SystemClock.elapsedRealtime()
+        acquired.engine.createConversation(ConversationConfig(
+            samplerConfig = SamplerConfig(1, 1.0, 0.0, 42),
+            maxOutputToken = maxTokens, thinkingConfig = ThinkingConfig(false),
+            automaticToolCalling = false
+        )).use { conversation ->
+            synchronized(conversationLock) { activeConversation = conversation }
+            val timedOut = AtomicBoolean(false)
+            val timeout = watchdog.schedule({
+                synchronized(conversationLock) {
+                    if (activeConversation === conversation) {
+                        timedOut.set(true)
+                        conversation.cancelProcess()
+                    }
+                }
+            }, 300, TimeUnit.SECONDS)
+            val response = try {
+                conversation.sendMessage(Contents.of(Content.Text(prompt)))
+            } finally {
+                timeout.cancel(false)
+                synchronized(conversationLock) { activeConversation = null }
+            }
+            check(!timedOut.get()) { "문장 생성이 5분을 초과했습니다." }
+            check(!disposed)
+            val ended = SystemClock.elapsedRealtime()
+            val text = response.toString()
+            return mapOf("text" to text, "engineReused" to acquired.reused,
+                "initializationMs" to acquired.initializationMs, "generationMs" to ended - began,
+                "characters" to text.length, "processPssMbAfter" to android.os.Debug.getPss() / 1024.0,
+                "backend" to "GPU", "runtime" to "LiteRT-LM 0.16.1")
+        }
+    }
+
+    /** Fixed app-private input/output, available only in debuggable evaluation builds. */
+    fun evaluateBatch() {
+        if (activity.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+        if (!busy.compareAndSet(false, true)) return
+        worker.execute {
+            val directory = File(activity.filesDir, "evaluation50")
+            val output = File(directory, "results.json")
+            val gson = com.google.gson.Gson()
+            val records = mutableListOf<Map<String, Any>>()
+            try {
+                val manifest = com.google.gson.JsonParser.parseString(File(directory, "manifest.json").readText()).asJsonArray
+                require(manifest.size() in 1..50)
+                for (entry in manifest) {
+                    check(!disposed)
+                    val name = entry.asJsonObject.get("file").asString
+                    require(Regex("foodify-fifty-[0-9]{2}\\.jpg").matches(name))
+                    val row = try {
+                        mapOf<String, Any>("file" to name, "result" to analyze(File(directory, name).path))
+                    } catch (error: Exception) {
+                        releaseEngine()
+                        mapOf<String, Any>("file" to name, "error" to (error.message ?: error.javaClass.simpleName))
+                    }
+                    records.add(row)
+                    val temp = File(directory, "results.partial")
+                    temp.writeText(gson.toJson(mapOf("records" to records, "complete" to false)))
+                    java.nio.file.Files.move(temp.toPath(), output.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+                output.writeText(gson.toJson(mapOf("records" to records, "complete" to true)))
+            } catch (error: Exception) {
+                directory.mkdirs()
+                output.writeText(gson.toJson(mapOf("records" to records, "complete" to false, "error" to (error.message ?: "Evaluation failed"))))
+            } finally { stage = "대기"; busy.set(false) }
         }
     }
 

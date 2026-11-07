@@ -1,3 +1,6 @@
+import 'ar_research_screen.dart';
+import 'ar_weight_screen.dart';
+import '../core/food_classifier.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -133,6 +136,14 @@ class _LoginState extends ConsumerState<LoginScreen> {
       TextButton(
         onPressed: busy ? null : () => setState(() => signup = !signup),
         child: Text(signup ? '로그인으로 돌아가기' : '처음이라면 회원 가입'),
+      ),
+      OutlinedButton.icon(
+        onPressed: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const ArResearchScreen()),
+        ),
+        icon: const Icon(Icons.straighten),
+        label: const Text('AR 중량 측정 · 오프라인'),
       ),
     ]),
   );
@@ -510,6 +521,14 @@ class _HomeState extends ConsumerState<HomeScreen> {
                 ).push(MaterialPageRoute(builder: (_) => const ChatScreen())),
           child: const Text('식단 피드백 챗봇'),
         ),
+        OutlinedButton.icon(
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const ArResearchScreen()),
+          ),
+          icon: const Icon(Icons.straighten),
+          label: const Text('AR 중량 측정 · 실측 기록'),
+        ),
         for (final p in pending)
           ListTile(
             title: const Text('전송 대기 중인 촬영'),
@@ -676,20 +695,9 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
     if (busy) return;
     setState(() => busy = true);
     try {
-      if (paths.isEmpty) {
-        final support = await ArCapabilities.check();
-        if (!mounted) return;
-        if (support['depth'] != false &&
-            support['arCore'] != 'UNAVAILABLE' &&
-            support['arCore'] != 'UNSUPPORTED_DEVICE_NOT_CAPABLE') {
-          final fallback = await captureAr();
-          if (!mounted || !fallback) return;
-        }
-      }
-      if (mounted) {
-        notify(context, '사진 기반 추정으로 촬영합니다.');
-        await capture();
-      }
+      // Recognition uses the full-resolution camera photo; AR is used only for
+      // volume, from the meal screen's "AR로 중량 측정" step.
+      if (mounted) await capture();
     } finally {
       if (mounted) setState(() => busy = false);
     }
@@ -724,6 +732,15 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
     try {
       final api = ref.read(apiProvider);
       if (!await ensureAiConsent(context, api)) return;
+      if (saved == null) {
+        try {
+          final recognition = await FoodClassifier.classify(paths);
+          if (recognition != null) captureInfo['foodRecognition'] = recognition;
+        } catch (_) {
+          captureInfo.remove('foodRecognition');
+          if (mounted) notify(context, '기기 음식 인식을 사용할 수 없어 사진 분석으로 이어갑니다.');
+        }
+      }
       captureInfo['regionDrafts'] = [
         for (var i = 0; i < paths.length; i++)
           if (regionDrafts.containsKey(paths[i]))
@@ -856,7 +873,7 @@ class _CaptureState extends ConsumerState<CaptureScreen> {
       ),
       FilledButton(
         onPressed: paths.isEmpty || busy ? null : send,
-        child: Text(busy ? '처리 중…' : '자동 저장하고 분석'),
+        child: Text(busy ? '음식 인식·저장 중…' : '자동 저장하고 분석'),
       ),
       if (busy) const LinearProgressIndicator(),
       if (saved != null) const Text('전송 실패 시 홈에서 다시 전송할 수 있습니다.'),
@@ -981,6 +998,8 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
             'name': item['name'],
             'grams': item['grams'],
             'foodId': item['foodId'],
+            if (item['_arMeasurement'] != null)
+              'arMeasurement': item['_arMeasurement'],
           },
       ],
     };
@@ -1054,6 +1073,36 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
       changed(index);
       formGeneration++;
     });
+  }
+
+  String weightLabel(Map item) {
+    final grams = item['grams'];
+    if (grams is! num) return '중량: 확인 필요';
+    final text = '중량: ${grams.toStringAsFixed(grams % 1 == 0 ? 0 : 1)} g';
+    final m = item['weightMeasurement'];
+    if (m is Map && m['method'] == 'AR_VOLUME') return '$text · AR 측정';
+    if (item['weightEstimate'] is Map) {
+      return '$text · AI 참고값(일반 1회 제공량 기준) · AR 측정 또는 직접 수정 권장';
+    }
+    return '$text · 직접 입력';
+  }
+
+  /// AR volume goes to the server, which applies the DB-category density and saves.
+  Future<void> measureWithAr(int index) async {
+    final name = foodDisplayName(items[index]);
+    final measured = await Navigator.push<Map<String, dynamic>>(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            ArWeightScreen(foodName: name, api: ref.read(apiProvider)),
+      ),
+    );
+    if (measured == null || !mounted) return;
+    setState(() {
+      items[index]['_arMeasurement'] = measured;
+      dirty = true;
+    });
+    await saveMeal();
   }
 
   String foodLabel(Map food) =>
@@ -1232,6 +1281,22 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                         Text(
                           foodDisplayName(items[i]),
                           style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        Text(weightLabel(items[i])),
+                        if (items[i]['weightMeasurement'] is Map &&
+                            items[i]['weightMeasurement']['method'] ==
+                                'AR_VOLUME')
+                          Text(
+                            '부피 ${(items[i]['weightMeasurement']['volumeMl'] as num).toStringAsFixed(1)} mL × '
+                            '${items[i]['weightMeasurement']['densityGroupLabel']} 밀도 ${items[i]['weightMeasurement']['densityGPerMl']} g/mL'
+                            '${items[i]['weightMeasurement']['majorCategory'] == null ? '' : ' (DB 분류: ${items[i]['weightMeasurement']['majorCategory']})'}'
+                            '${items[i]['weightMeasurement']['qualityHold'] == true ? ' · 깊이 품질 확인 필요' : ''}',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        OutlinedButton.icon(
+                          onPressed: busy ? null : () => measureWithAr(i),
+                          icon: const Icon(Icons.view_in_ar),
+                          label: const Text('AR로 중량 측정'),
                         ),
                         gap(),
                         ExpansionTile(

@@ -1,0 +1,15 @@
+{
+  "model": "prithivMLmods/Food-101-93M",
+  "revision": "addcbf20006b2ec0eb1bdff313ef732cd8634f11",
+  "sha256": "d43886fc7bad2e70b4542cea086c199d525d812ee927d904b3f35bc5ccf8e973",
+  "bytes": 343646785,
+  "onnx_top1_matches": 50,
+  "max_logit_difference": 2.5987625122070312e-05,
+  "input": [
+    1,
+    3,
+    224,
+    224
+  ],
+  "normalization": "(RGB/255-0.5)/0.5"
+}

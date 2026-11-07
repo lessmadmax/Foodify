@@ -8,8 +8,12 @@ class FoodRegionScreen extends StatefulWidget {
     required this.path,
     this.initial,
     this.service,
+    this.title = '음식 영역 보정',
+    this.guidance,
   });
   final String path;
+  final String title;
+  final String? guidance;
   final Map<String, dynamic>? initial;
   final RegionService? service;
   @override
@@ -48,7 +52,7 @@ class _FoodRegionScreenState extends State<FoodRegionScreen> {
         RegionStage.complete => '보정 적용 완료',
       };
       return Scaffold(
-        appBar: AppBar(title: const Text('음식 영역 보정')),
+        appBar: AppBar(title: Text(widget.title)),
         body: ListView(
           padding: const EdgeInsets.all(16),
           children: [
@@ -58,7 +62,10 @@ class _FoodRegionScreenState extends State<FoodRegionScreen> {
             if (c.message != null)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(c.message!, key: const Key('region-message')),
+                child: Text(
+                  widget.guidance ?? c.message!,
+                  key: const Key('region-message'),
+                ),
               ),
             if (c.stage == RegionStage.failed)
               Wrap(
@@ -118,8 +125,9 @@ class _FoodRegionScreenState extends State<FoodRegionScreen> {
               ),
             ],
             if (c.stage == RegionStage.reviewing) ...[
-              const Text(
-                '음식 하나의 테두리를 순서대로 누르고 영역 완성을 선택하세요. 다른 음식은 별도 영역으로 지정합니다.',
+              Text(
+                widget.guidance ??
+                    '음식 하나의 테두리를 순서대로 누르고 영역 완성을 선택하세요. 다른 음식은 별도 영역으로 지정합니다.',
               ),
               Wrap(
                 spacing: 8,
@@ -143,7 +151,11 @@ class _FoodRegionScreenState extends State<FoodRegionScreen> {
                     icon: const Icon(Icons.delete_outline),
                   ),
                 ),
-              const Text('보정한 경계는 사진과 함께 저장됩니다. 실제 부피·중량 계산 연결은 검증 단계입니다.'),
+              Text(
+                widget.guidance == null
+                    ? '보정한 경계는 사진과 함께 저장됩니다. 실제 부피·중량 계산 연결은 검증 단계입니다.'
+                    : '영역을 적용한 뒤 AR 중량 측정 화면에서 부피를 계산하고 실측값을 저장하세요.',
+              ),
               if (widget.initial != null)
                 TextButton(
                   onPressed: () =>

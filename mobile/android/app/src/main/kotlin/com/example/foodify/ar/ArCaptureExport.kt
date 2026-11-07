@@ -18,16 +18,18 @@ object ArCaptureExport {
             runCatching {
                 val meta = JSONObject(File(frame, "metadata.json").readText())
                 val frameTime = meta.getString("frameTimestampNs").toLong()
-                val depthAge = abs(frameTime - meta.getString("depthTimestampNs").toLong()) / 1e6
+                val depthAge = (frameTime.toDouble() - meta.getString("depthTimestampNs").toDouble()) / 1e6
                 val imageAge = abs(frameTime - meta.getString("cameraTimestampNs").toLong()) / 1e6
                 val pixels = meta.getInt("depthWidth") * meta.getInt("depthHeight")
                 val coverage = meta.getInt("confidentPixels").toDouble() / pixels
-                if (depthAge > 100 || imageAge > 50 || coverage < 0.05 || meta.getString("trackingState") != "TRACKING") null
+                if (depthAge < -5 || depthAge > ArTiming.MAX_SOURCE_AGE_MS || imageAge > 50 || meta.getString("trackingState") != "TRACKING") null
                 else Triple(frame, meta, coverage)
             }.getOrNull()
         }
+        // Low depth coverage no longer forces a re-take with the plain camera: the photo is still
+        // used, and the server drops the AR summary below its 5% coverage rule (arExcluded).
         val (frame, meta, coverage) = candidates.maxByOrNull { it.third }
-            ?: error("사진과 일치하는 유효 깊이가 부족합니다. 밝은 곳에서 다시 촬영하거나 사진 분석을 이용해 주세요.")
+            ?: error("AR 촬영 프레임을 확인하지 못했습니다. 다시 촬영하거나 사진 분석을 이용해 주세요.")
         val dimensions = meta.getJSONObject("cpuIntrinsics").getJSONArray("imageDimensions")
         val width = dimensions.getInt(0); val height = dimensions.getInt(1)
         require(width % 2 == 0 && height % 2 == 0)
