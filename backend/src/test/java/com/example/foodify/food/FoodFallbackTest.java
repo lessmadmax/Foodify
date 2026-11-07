@@ -76,6 +76,70 @@ class FoodFallbackTest {
         assertThat(manual.get("foodId")).isEqualTo("b");
         assertThat(((Map<?,?>)manual.get("source")).containsKey("fallbackNotice")).isFalse();
     }
+    void insertRaw(String id,String name,String major,String representative,int kcal,int row) {
+        insert(id,name,major,representative,100,kcal,row);
+        db.update("UPDATE foods SET category='원재료성 식품' WHERE id=?",id);
+    }
+    void insertRaw(String id,String name,String major,String representative,String state,int kcal,int row) {
+        insertRaw(id,name,major,representative,kcal,row);
+        db.update("UPDATE nutrition_source_rows SET raw_json=? WHERE version_id=?",json.write(Map.of("식품대분류명",major,"대표식품명",representative,"식품세분류명",state)),"v-"+id);
+    }
+    @Test void rawIngredientsPreferFreshAndHonorStateWords() {
+        insertRaw("banana-fresh","바나나_생것","과일류","바나나","생것",77,20);
+        insertRaw("banana-dry","바나나_말린것","과일류","바나나","말린것",314,21);
+        insertRaw("egg-fresh","달걀_생것","난류","달걀","생것",146,22);
+        insertRaw("egg-boiled","달걀_삶은것","난류","달걀","삶은것",155,23);
+        insertRaw("potato-baked","감자_구운것(팬)","감자 및 전분류","감자","구운것(팬)",120,24);
+        insertRaw("peanut-dry","땅콩_말린것","견과 및 종실류","땅콩","말린것",520,25);
+        insertRaw("peanut-roast2","땅콩_볶은것","견과 및 종실류","땅콩","볶은것",567,26);
+        insertRaw("sweet-potato-1","고구마_생것","감자 및 전분류","고구마","생것",131,27);
+        insertRaw("sweet-potato-2","고구마_찐것","감자 및 전분류","고구마","찐것",147,28);
+        insertRaw("sweet-potato-leaf","고구마_줄기_생것","채소류","고구마","생것",23,29);
+        var banana=foods.search("바나나").getFirst();
+        assertThat(banana.get("kcal")).isEqualTo(new BigDecimal("77.0000"));
+        assertThat(banana.get("rawState")).isEqualTo("생것");
+        assertThat(banana.get("name")).isEqualTo("바나나(생것)");
+        var dried=foods.search("말린 바나나").getFirst();
+        assertThat(dried.get("kcal")).isEqualTo(new BigDecimal("314.0000"));
+        assertThat(dried.get("id")).isNotEqualTo(banana.get("id"));
+        assertThat(categories.majorOf(dried.get("id").toString())).isEqualTo("과일류");
+        assertThat(foods.search("삶은달걀").getFirst().get("kcal")).isEqualTo(new BigDecimal("155.0000"));
+        assertThat(foods.search("구운 감자").getFirst().get("memberIds").toString()).contains("potato-baked");
+        // No fresh peanuts: every state; "생땅콩" has no matching state so raw matching is skipped.
+        assertThat(foods.search("땅콩").getFirst().get("rawState")).isEqualTo("ALL");
+        assertThat(foods.search("생땅콩").stream().map(r->r.get("samplePolicy")).toList()).doesNotContain("RAW_REPRESENTATIVE");
+        // Same representative in two majors: the one with more items wins.
+        var sweet=foods.search("고구마").getFirst();
+        assertThat(sweet.get("majorCategory")).isEqualTo("감자 및 전분류");
+        assertThat(sweet.get("memberIds").toString()).contains("sweet-potato-1").doesNotContain("sweet-potato-leaf","sweet-potato-2");
+        var result=foods.calculate(json.read(json.write(Map.of("name","말린 바나나","grams",10))));
+        assertThat(result.get("status")).isEqualTo("COMPLETE");
+        assertThat(((Map<?,?>)result.get("nutrition")).get("kcal")).isEqualTo(new BigDecimal("31.40"));
+    }
+    @Test void bareIngredientNameUsesRawRepresentativeMedianAndNutDensity() {
+        insert("bread","기타빵_카라멜아몬드","빵 및 과자류","기타빵",100,450,10);
+        insertRaw("almond-roast","아몬드_볶은것","견과 및 종실류","아몬드",594,11);
+        insertRaw("almond-dry","아몬드_말린것","견과 및 종실류","아몬드",581,12);
+        insertRaw("almond-oil","아몬드유","유지류","아몬드유",884,13);
+        insertRaw("peanut-roast","땅콩_볶은것","견과 및 종실류","땅콩",567,14);
+        insert("peanut-side","땅콩조림","반찬류","조림",100,300,15);
+        var almond=foods.search("아몬드");
+        assertThat(almond).hasSize(1);
+        assertThat(almond.getFirst().get("samplePolicy")).isEqualTo("RAW_REPRESENTATIVE");
+        assertThat(almond.getFirst().get("memberIds").toString()).contains("almond-roast","almond-dry").doesNotContain("almond-oil","bread");
+        assertThat(almond.getFirst().get("kcal")).isEqualTo(new BigDecimal("587.5000"));
+        assertThat(almond.getFirst().get("majorCategory")).isEqualTo("견과 및 종실류");
+        String id=almond.getFirst().get("id").toString();
+        assertThat(categories.majorOf(id)).isEqualTo("견과 및 종실류");
+        assertThat(DensityGroups.of(categories.majorOf(id)).id()).isEqualTo("NUT");
+        assertThat(foods.search("땅콩").getFirst().get("memberIds").toString()).contains("peanut-roast").doesNotContain("peanut-side");
+        var result=foods.calculate(json.read(json.write(Map.of("name","아몬드","grams",10))));
+        assertThat(result.get("status")).isEqualTo("COMPLETE");
+        assertThat(((Map<?,?>)result.get("nutrition")).get("kcal")).isEqualTo(new BigDecimal("58.75"));
+        // Exact names and dish names containing the ingredient keep their own matches.
+        assertThat(foods.search("아몬드_볶은것").getFirst().get("id")).isEqualTo("almond-roast");
+        assertThat(foods.search("카라멜아몬드").getFirst().get("id")).isEqualTo("bread");
+    }
     @Test void duplicatesInSourceRowsDoNotIncreaseSampleCount() {
         db.update("INSERT INTO nutrition_source_rows SELECT dataset_id,99,version_id,raw_json FROM nutrition_source_rows WHERE row_number=1");
         assertThat(foods.search("무청김치").getFirst().get("sampleCount")).isEqualTo(2);
