@@ -20,6 +20,8 @@ mobile/android/key.properties
 data/private/
 data/nutrition/raw/
 data/nutrition/processed/
+# AI Hub 음식 이미지 원본(대용량, 재배포 금지)
+data/food-images/
 scripts/__pycache__/
 
 /mobile/android/app/src/main/assets/food101/food101.onnx
