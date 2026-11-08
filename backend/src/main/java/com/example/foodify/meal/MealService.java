@@ -21,19 +21,67 @@ public class MealService {
      * AR weight: the app sends only the measured volume; the server picks the density from the
      * matched food's official major category (DensityGroups) and computes grams.
      */
-    private Map<String,Object> applyArMeasurement(JsonNode ar,com.fasterxml.jackson.databind.node.ObjectNode input) {
-        double volume=ar.path("volumeMl").asDouble(Double.NaN);
-        if(!(volume>0 && volume<=5000)) throw ApiError.bad("INVALID_AR_VOLUME");
+    public static final int HEIGHT_CALLS=3;
+    public static final double MAX_AREA_CM2=2000, MAX_HEIGHT_CM=30;
+    /** Food id, official major category and density group used for an AR weight of this food. */
+    private Map<String,Object> densityOf(com.fasterxml.jackson.databind.node.ObjectNode input) {
         var resolved=foods.calculate(input);
         String foodId=Objects.toString(resolved.get("foodId"),"");
         String major=categories.majorOf(foodId);
-        var group=DensityGroups.of(major);
-        var grams=java.math.BigDecimal.valueOf(volume).multiply(group.density()).setScale(1,java.math.RoundingMode.HALF_UP).max(new java.math.BigDecimal("0.1"));
+        var out=new LinkedHashMap<String,Object>();
+        out.put("foodId",foodId); out.put("majorCategory",major); out.put("group",DensityGroups.of(major));
+        return out;
+    }
+    private static java.math.BigDecimal gramsOf(double volume,DensityGroups.Group group) {
+        return java.math.BigDecimal.valueOf(volume).multiply(group.density()).setScale(1,java.math.RoundingMode.HALF_UP).max(new java.math.BigDecimal("0.1"));
+    }
+    /** Preview for the AR screen: same food matching and density as the meal save. */
+    public Map<String,Object> areaHeightPreview(String name,String foodId,double areaCm2,double heightCm) {
+        var input=(com.fasterxml.jackson.databind.node.ObjectNode)json.read(json.write(Map.of("name",name,"foodId",foodId==null?"":foodId)));
+        var d=densityOf(input);
+        var group=(DensityGroups.Group)d.get("group");
+        double volume=Math.round(areaCm2*heightCm*10)/10.0;
+        var out=new LinkedHashMap<String,Object>();
+        out.put("method","AREA_HEIGHT"); out.put("volumeMl",volume); out.put("grams",gramsOf(volume,group));
+        out.put("foodId",d.get("foodId")); out.put("majorCategory",d.get("majorCategory"));
+        out.put("densityGroup",group.id()); out.put("densityGroupLabel",group.label()); out.put("densityGPerMl",group.density());
+        return out;
+    }
+    private static double positive(JsonNode n,double max,String error) {
+        double v=n.asDouble(Double.NaN);
+        if(!n.isNumber() || !(v>0 && v<=max)) throw ApiError.bad(error);
+        return v;
+    }
+    private Map<String,Object> applyArMeasurement(JsonNode ar,com.fasterxml.jackson.databind.node.ObjectNode input) {
+        // AREA_HEIGHT (current): top-view area (AR scale) × AI mean height. AR_VOLUME: legacy depth volume.
+        boolean areaHeight="AREA_HEIGHT".equals(ar.path("method").asText()) || ar.has("heightCm");
+        double area=Double.NaN,height=Double.NaN,volume;
+        if(areaHeight) {
+            area=positive(ar.path("areaCm2"),MAX_AREA_CM2,"INVALID_AR_AREA");
+            height=positive(ar.path("heightCm"),MAX_HEIGHT_CM,"INVALID_AR_HEIGHT");
+            volume=Math.round(area*height*10)/10.0;
+        } else volume=ar.path("volumeMl").asDouble(Double.NaN);
+        if(!(volume>0 && volume<=5000)) throw ApiError.bad("INVALID_AR_VOLUME");
+        var d=densityOf(input);
+        String foodId=(String)d.get("foodId"), major=(String)d.get("majorCategory");
+        var group=(DensityGroups.Group)d.get("group");
+        var grams=gramsOf(volume,group);
         input.put("grams",grams); input.put("foodId",foodId);
         var reasons=new ArrayList<String>();
         for(var r:ar.path("holdReasons")) if(r.isTextual() && reasons.size()<10) reasons.add(r.asText().substring(0,Math.min(200,r.asText().length())));
         var m=new LinkedHashMap<String,Object>();
-        m.put("method","AR_VOLUME"); m.put("volumeMl",volume); m.put("qualityHold",ar.path("qualityHold").asBoolean(false));
+        m.put("method",areaHeight?"AREA_HEIGHT":"AR_VOLUME"); m.put("volumeMl",volume);
+        if(areaHeight) {
+            m.put("areaCm2",area); m.put("heightCm",height);
+            var samples=new ArrayList<Double>();
+            for(var s:ar.path("heightSamples")) if(s.isNumber() && samples.size()<HEIGHT_CALLS) samples.add(s.asDouble());
+            m.put("heightSamples",samples);
+            if(ar.path("distanceMm").isNumber()) m.put("distanceMm",ar.path("distanceMm").asDouble());
+            // Depth-based volume is kept only as a reference for later comparison.
+            if(ar.path("depthVolumeMl").isNumber() && ar.path("depthVolumeMl").asDouble()>0) m.put("depthVolumeMl",ar.path("depthVolumeMl").asDouble());
+            m.put("heightSource","OpenAI 평균 높이 "+HEIGHT_CALLS+"회 중앙값");
+        }
+        m.put("qualityHold",ar.path("qualityHold").asBoolean(false));
         m.put("holdReasons",reasons); m.put("majorCategory",major); m.put("densityGroup",group.id()); m.put("densityGroupLabel",group.label());
         m.put("densityGPerMl",group.density()); m.put("densityBasis",group.basis()); m.put("densitySource","FAO/INFOODS Density Database v2.0");
         m.put("volumeValidated",false); m.put("measuredAt",System.currentTimeMillis());

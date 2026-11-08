@@ -87,6 +87,43 @@ public class AppController {
         try {image=Base64.getDecoder().decode(encoded);} catch(IllegalArgumentException e) {throw ApiError.bad("INVALID_FOOD_BOX_REQUEST");}
         return ai.locateFood(image,name);
     }
+    /**
+     * AR weight (area × height, M12): asks the AI for the mean height 3 times in parallel, takes the
+     * median, and previews grams = area × height × category density. The meal save recomputes it.
+     */
+    @PostMapping("/ar/height") public Object foodHeight(Principal p,@RequestBody JsonNode body) {
+        AiConsent.require(db,p.getName());
+        String name=body.path("foodName").asText("").trim(),encoded=body.path("imageBase64").asText("");
+        double distance=body.path("distanceMm").asDouble(Double.NaN),mm=body.path("mmPerPixel").asDouble(Double.NaN),
+            width=body.path("photoWidthCm").asDouble(Double.NaN),height=body.path("photoHeightCm").asDouble(Double.NaN),
+            area=body.path("areaCm2").asDouble(Double.NaN);
+        if(name.isEmpty()||name.length()>100||encoded.isEmpty()||encoded.length()>4_000_000
+            ||!(distance>=50&&distance<=3000)||!(mm>0&&mm<10)||!(width>0&&width<500)||!(height>0&&height<500)||!(area>0&&area<=MealService.MAX_AREA_CM2))
+            throw ApiError.bad("INVALID_FOOD_HEIGHT_REQUEST");
+        byte[] image;
+        try {image=Base64.getDecoder().decode(encoded);} catch(IllegalArgumentException e) {throw ApiError.bad("INVALID_FOOD_HEIGHT_REQUEST");}
+        var answers=new ArrayList<JsonNode>();
+        ApiError failure=null;
+        try(var pool=java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var calls=new ArrayList<java.util.concurrent.Future<JsonNode>>();
+            for(int i=0;i<MealService.HEIGHT_CALLS;i++) calls.add(pool.submit(()->ai.estimateHeight(image,name,distance,mm,width,height,area)));
+            for(var call:calls) {
+                try {answers.add(call.get());}
+                catch(java.util.concurrent.ExecutionException e) {if(e.getCause() instanceof ApiError ae) failure=ae; else failure=ApiError.conflict("OPENAI_UNAVAILABLE");}
+                catch(InterruptedException e) {Thread.currentThread().interrupt();throw ApiError.conflict("OPENAI_UNAVAILABLE");}
+            }
+        }
+        if(answers.isEmpty()) throw failure!=null?failure:ApiError.conflict("OPENAI_UNAVAILABLE");
+        var heights=answers.stream().map(a->a.path("heightCm").asDouble()).sorted().toList();
+        int n=heights.size();
+        double median=n%2==1?heights.get(n/2):(heights.get(n/2-1)+heights.get(n/2))/2;
+        var assumptions=new ArrayList<String>();
+        for(var a:answers) for(var s:a.path("assumptions")) if(s.isTextual() && assumptions.size()<5) assumptions.add(s.asText().substring(0,Math.min(300,s.asText().length())));
+        var result=new LinkedHashMap<String,Object>(meals.areaHeightPreview(name,body.path("foodId").asText(""),area,median));
+        result.put("heightCm",median); result.put("heightSamples",heights); result.put("assumptions",assumptions);
+        result.put("distanceMm",distance); result.put("areaCm2",area);
+        return result;
+    }
     @PostMapping("/feedback") public Object feedback(Principal p,@RequestBody JsonNode body) {
         AiConsent.require(db,p.getName());
         LocalDate from=LocalDate.parse(body.path("from").asText()),to=LocalDate.parse(body.path("to").asText());

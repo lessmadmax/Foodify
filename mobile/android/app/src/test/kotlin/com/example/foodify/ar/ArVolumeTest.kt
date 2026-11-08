@@ -67,6 +67,17 @@ class ArVolumeTest {
         assertEquals("ai_box",r["source"])
         assertNotNull(r["reason"])
     }
+    @Test fun scaleUsesPlateBandDistanceForTopViewArea() {
+        // Food 25%×25% of an 80px image at 500mm with fx=100: 5mm per pixel, 400px → 100cm².
+        val r=ArVolume.scale(frame(),food,emptyList())
+        assertEquals(500.0,r["distanceMm"] as Double,1e-9)
+        assertEquals("auto_band",r["distanceSource"])
+        assertEquals(100.0,r["areaCm2"] as Double,1e-6)
+        assertEquals(5.0,r["mmPerPixel"] as Double,1e-9)
+        assertEquals(40.0,r["photoWidthCm"] as Double,1e-9)
+        assertEquals("base_region",ArVolume.scale(frame(),food,base)["distanceSource"])
+        assertThrows(IllegalArgumentException::class.java) { ArVolume.scale(frame().copy(depth=IntArray(6400)),food,emptyList()) }
+    }
     @Test fun convexHullDropsInteriorPoints() {
         val hull=ArVolume.convexHull(listOf(Pair(0.0,0.0),Pair(1.0,0.0),Pair(1.0,1.0),Pair(0.0,1.0),Pair(.5,.5)))
         assertEquals(4,hull.size);assertFalse(hull.contains(Pair(.5,.5)))

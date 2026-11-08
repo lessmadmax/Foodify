@@ -1080,6 +1080,9 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
     if (grams is! num) return '중량: 확인 필요';
     final text = '중량: ${grams.toStringAsFixed(grams % 1 == 0 ? 0 : 1)} g';
     final m = item['weightMeasurement'];
+    if (m is Map && m['method'] == 'AREA_HEIGHT') {
+      return '$text · AR 면적 × AI 높이';
+    }
     if (m is Map && m['method'] == 'AR_VOLUME') return '$text · AR 측정';
     if (item['weightEstimate'] is Map) {
       return '$text · AI 참고값(일반 1회 제공량 기준) · AR 측정 또는 직접 수정 권장';
@@ -1093,8 +1096,11 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
     final measured = await Navigator.push<Map<String, dynamic>>(
       context,
       MaterialPageRoute(
-        builder: (_) =>
-            ArWeightScreen(foodName: name, api: ref.read(apiProvider)),
+        builder: (_) => ArWeightScreen(
+          foodName: name,
+          foodId: items[index]['foodId']?.toString(),
+          api: ref.read(apiProvider),
+        ),
       ),
     );
     if (measured == null || !mounted) return;
@@ -1283,6 +1289,16 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         Text(weightLabel(items[i])),
+                        if (items[i]['weightMeasurement'] is Map &&
+                            items[i]['weightMeasurement']['method'] ==
+                                'AREA_HEIGHT')
+                          Text(
+                            '면적 ${(items[i]['weightMeasurement']['areaCm2'] as num).toStringAsFixed(1)} cm² × '
+                            'AI 평균 높이 ${(items[i]['weightMeasurement']['heightCm'] as num).toStringAsFixed(2)} cm × '
+                            '${items[i]['weightMeasurement']['densityGroupLabel']} 밀도 ${items[i]['weightMeasurement']['densityGPerMl']} g/mL'
+                            '${items[i]['weightMeasurement']['majorCategory'] == null ? '' : ' (DB 분류: ${items[i]['weightMeasurement']['majorCategory']})'}',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
                         if (items[i]['weightMeasurement'] is Map &&
                             items[i]['weightMeasurement']['method'] ==
                                 'AR_VOLUME')

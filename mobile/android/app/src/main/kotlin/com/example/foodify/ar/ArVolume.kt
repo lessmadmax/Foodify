@@ -150,6 +150,35 @@ object ArVolume {
         if(hull.size<3) return boxOnly("음식 윤곽을 만들지 못했습니다.")
         return mapOf("source" to "ai_box_depth","foodPolygons" to listOf(hull),"foodPixelCount" to best.size,"basePlaneRmseMm" to plane.rmse)
     }
+    const val SCALE_MIN_PLATE_SAMPLES=20
+    /**
+     * Area × height method (M12): real top-view scale only, no per-pixel food height.
+     * Plate distance = median depth of the base region minus the food, or of the band just outside the
+     * food outline when no base region is drawn. Area assumes a straight top-down view at that distance.
+     */
+    fun scale(f:Frame,food:List<List<Pair<Double,Double>>>,base:List<List<Pair<Double,Double>>>):Map<String,Any?> {
+        validate(food);if(base.isNotEmpty())validate(base)
+        val count=f.width*f.height;val uv=mapper(f)
+        val fm=BooleanArray(count);val bm=BooleanArray(count);val valid=BooleanArray(count)
+        val px=DoubleArray(count);val py=DoubleArray(count);val inside=BooleanArray(count)
+        for(y in 0 until f.height)for(x in 0 until f.width) {
+            val i=y*f.width+x;val u=uv((x+.5)/f.width,(y+.5)/f.height)
+            inside[i]=u.first in 0.0..1.0 && u.second in 0.0..1.0
+            fm[i]=mask(u.first,u.second,food);bm[i]=base.isNotEmpty() && mask(u.first,u.second,base)
+            px[i]=u.first*f.imageWidth;py[i]=u.second*f.imageHeight
+            valid[i]=f.depth[i]>0 && inside[i]
+        }
+        val plate=if(base.isNotEmpty()) BooleanArray(count) { bm[it] && !fm[it] }
+            else autoBand(f.width,f.height,fm,px,py,inside,AUTO_BAND_INNER*f.imageWidth,AUTO_BAND_OUTER*f.imageWidth)
+        val depths=(0 until count).filter { plate[it] && valid[it] }.map { f.depth[it].toDouble() }.sorted()
+        if(depths.size<SCALE_MIN_PLATE_SAMPLES) fail("음식 주변 접시 면의 깊이를 확인하지 못했습니다. 밝은 곳에서 좌우로 조금 움직이며 다시 촬영해 주세요.")
+        val z=if(depths.size%2==1) depths[depths.size/2] else (depths[depths.size/2-1]+depths[depths.size/2])/2
+        val areaFraction=food.sumOf { polygon -> abs(polygon.indices.sumOf { k -> val a=polygon[k];val b=polygon[(k+1)%polygon.size];a.first*b.second-b.first*a.second })/2 }
+        val areaMm2=areaFraction*f.imageWidth*f.imageHeight*(z/f.fx)*(z/f.fy)
+        val mm=z/((f.fx+f.fy)/2)
+        return mapOf("distanceMm" to z,"distanceSource" to if(base.isNotEmpty()) "base_region" else "auto_band","plateSamples" to depths.size,
+            "areaCm2" to areaMm2/100,"mmPerPixel" to mm,"photoWidthCm" to f.imageWidth*mm/10,"photoHeightCm" to f.imageHeight*mm/10)
+    }
     internal fun convexHull(input:List<Pair<Double,Double>>):List<Pair<Double,Double>> {
         val p=input.distinct().sortedWith(compareBy({ it.first },{ it.second }))
         if(p.size<3) return p

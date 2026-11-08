@@ -54,6 +54,7 @@ class ArResearchBridge(private val activity:Activity,messenger:BinaryMessenger) 
                         "prepare" -> prepare(frame(input.getString("framePath")))
                         "estimate" -> estimate(input)
                         "foodFromBox" -> foodFromBox(input)
+                        "scale" -> scale(input)
                         "save" -> save(input)
                         "records" -> refreshRecords().map { clean(it) }
                         "record" -> clean(readRecord(input.getString("id")))
@@ -173,6 +174,15 @@ class ArResearchBridge(private val activity:Activity,messenger:BinaryMessenger) 
         val polygons=result["foodPolygons"] as List<List<Pair<Double,Double>>>
         result["foodPolygons"]=polygons.map { polygon -> polygon.map { listOf(it.first,it.second) } }
         return result
+    }
+    /** Area × height method: plate distance and top-view food area on the multi-frame depth. */
+    private fun scale(input:JSONObject):Map<String,Any?> {
+        val f=frame(input.getString("framePath"))
+        val food=polygons(input.getJSONObject("foodRegion"),f);val base=input.optJSONObject("baseRegion")?.let {polygons(it,f)} ?: emptyList()
+        val reference=observation(f)
+        val siblings=f.parentFile!!.listFiles().orEmpty().filter {it.isDirectory && it.name.matches(Regex("frame-[0-9]{2}"))}.sortedBy {it.name}.take(10)
+        val fused=runCatching {ArFusion.combine(reference,siblings.mapNotNull {runCatching {observation(it)}.getOrNull()}).frame}.getOrDefault(reference.frame)
+        return ArVolume.scale(fused,food,base)
     }
     private fun estimate(input:JSONObject):Map<String,Any?> {
         val f=frame(input.getString("framePath"));val food=input.optString("foodName").trim();var result:Map<String,Any?>

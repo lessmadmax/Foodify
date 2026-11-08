@@ -60,5 +60,17 @@ class OpenAiClientTest {
         assertTrue(sent.path("input").get(0).path("content").get(1).path("image_url").asText().startsWith("data:image/jpeg;base64,"));
         assertThrows(ApiError.class,()->client(1).analyze(List.of(new byte[]{1})));
     }
+    String output(String text){return json.write(java.util.Map.of("status","completed","usage",java.util.Map.of("input_tokens",1,"output_tokens",1),"output",List.of(java.util.Map.of("type","message","content",List.of(java.util.Map.of("type","output_text","text",text))))));}
+    @Test void heightAsksOnlyForMeanHeightWithMeasuredArea() {
+        response=output("{\"heightCm\":2.5,\"assumptions\":[\"밥이 약 2.5cm 쌓임\"]}");
+        var result=client(5).estimateHeight(new byte[]{1},"쌀밥",300,0.1,40,30,20.2);
+        assertEquals(2.5,result.path("heightCm").asDouble());
+        var sent=json.read(request.get());
+        assertEquals("foodify_ar_height",sent.path("text").path("format").path("name").asText());
+        String prompt=sent.path("input").get(0).path("content").get(0).path("text").asText();
+        assertTrue(prompt.contains("평균 높이(cm)만") && prompt.contains("20.2cm²") && prompt.contains("30.0cm"));
+        response=output("{\"heightCm\":45,\"assumptions\":[]}");
+        assertEquals("AI_INVALID_OUTPUT",assertThrows(ApiError.class,()->client(5).estimateHeight(new byte[]{1},"쌀밥",300,0.1,40,30,20.2)).code);
+    }
     @Test void incompleteResponseIsNotAccepted(){response="{\"status\":\"incomplete\",\"output\":[]}";assertEquals("OPENAI_INCOMPLETE",assertThrows(ApiError.class,()->client(2).analyze(List.of(new byte[]{1}))).code);}
 }

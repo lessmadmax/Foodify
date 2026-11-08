@@ -6,12 +6,20 @@ import '../core/api.dart';
 import '../core/ar_capabilities.dart';
 import 'food_region_screen.dart';
 
-/// Meal-flow AR weight: capture → food/plate region → on-device volume.
-/// Returns {volumeMl, qualityHold, holdReasons}; the server applies the
-/// category density, so no weight is computed here.
+/// Meal-flow AR weight (area × height, M12): capture → confirmed food outline
+/// → on-device plate distance and top-view area → server asks the AI for the
+/// mean height (3 calls, median) → grams = area × height × category density.
+/// The depth volume is kept only as a reference. Returns the AREA_HEIGHT
+/// measurement; the server recomputes the weight on save.
 class ArWeightScreen extends StatefulWidget {
-  const ArWeightScreen({super.key, required this.foodName, this.api});
+  const ArWeightScreen({
+    super.key,
+    required this.foodName,
+    this.foodId,
+    this.api,
+  });
   final String foodName;
+  final String? foodId;
 
   /// Server API for the AI food box; null = manual food region only.
   final Api? api;
@@ -22,6 +30,10 @@ class ArWeightScreen extends StatefulWidget {
 class _ArWeightScreenState extends State<ArWeightScreen> {
   static const channel = MethodChannel('foodify/ar_research');
   Map<String, dynamic>? preview, foodRegion, baseRegion, result;
+
+  /// Area × height result: on-device scale + server height/weight preview.
+  Map<String, dynamic>? scale, height;
+  String heightError = '';
   String? framePath;
   String message = '';
   String autoNote = '';
@@ -71,6 +83,9 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
       foodRegion = null;
       baseRegion = null;
       result = null;
+      scale = null;
+      height = null;
+      heightError = '';
       autoNote = '';
     });
     await autoRegion();
@@ -154,9 +169,7 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
         .toList();
     if (sessions.isEmpty) return null;
     final frames =
-        (await channel.invokeMethod('frames', {
-                  'session': sessions.first['id'],
-                })
+        (await channel.invokeMethod('frames', {'session': sessions.first['id']})
                 as List)
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
@@ -199,17 +212,70 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
   }
 
   Future<void> estimate() async {
-    final data = Map<String, dynamic>.from(
-      await channel.invokeMethod('estimate', {
-            'framePath': framePath,
-            'foodName': widget.foodName,
-            'foodRegion': foodRegion,
-            'baseRegion': baseRegion,
-          })
-          as Map,
+    setState(() {
+      result = null;
+      scale = null;
+      height = null;
+      heightError = '';
+    });
+    final region = {
+      'framePath': framePath,
+      'foodName': widget.foodName,
+      'foodRegion': foodRegion,
+      'baseRegion': baseRegion,
+    };
+    // Depth volume: reference only (kept for later comparison with the scale).
+    Map<String, dynamic>? depth;
+    try {
+      depth = Map<String, dynamic>.from(
+        await channel.invokeMethod('estimate', region) as Map,
+      );
+    } catch (_) {
+      depth = null;
+    }
+    if (mounted) setState(() => result = depth);
+    final measured = Map<String, dynamic>.from(
+      await channel.invokeMethod('scale', region) as Map,
     );
-    if (mounted) setState(() => result = data);
+    if (!mounted) return;
+    setState(() => scale = measured);
+    final api = widget.api;
+    if (api == null) {
+      setState(() => heightError = '서버에 연결되지 않아 AI 높이를 받을 수 없습니다.');
+      return;
+    }
+    try {
+      final bytes = await File(preview!['imagePath'] as String).readAsBytes();
+      final answer = Map<String, dynamic>.from(
+        await api.request(
+              'POST',
+              '/ar/height',
+              data: {
+                'foodName': widget.foodName,
+                'foodId': widget.foodId ?? '',
+                'imageBase64': base64Encode(bytes),
+                for (final key in const [
+                  'distanceMm',
+                  'mmPerPixel',
+                  'photoWidthCm',
+                  'photoHeightCm',
+                  'areaCm2',
+                ])
+                  key: measured[key],
+              },
+            )
+            as Map,
+      );
+      if (mounted) setState(() => height = answer);
+    } catch (e) {
+      if (mounted) {
+        setState(() => heightError = 'AI 높이 추정 실패: $e');
+      }
+    }
   }
+
+  String fixed(Object? value, int digits) =>
+      value is num ? value.toStringAsFixed(digits) : '-';
 
   /// Quality-passed volume first; a held observed volume is allowed but flagged.
   double? get volume {
@@ -227,12 +293,13 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
     body: ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        Text(
-          widget.foodName,
-          style: Theme.of(context).textTheme.titleLarge,
+        Text(widget.foodName, style: Theme.of(context).textTheme.titleLarge),
+        const Text(
+          '평평한 무광 접시에 담긴 음식 1가지를 바로 위에서 촬영하세요. 위에서 본 음식 면적 × AI 평균 높이 × 음식 분류별 밀도로 중량을 계산합니다(실측 검증 전 실험값).',
         ),
         const Text(
-          '평평한 무광 접시에 담긴 음식 1가지를 바로 위에서 촬영하세요. 부피 × 음식 분류별 밀도로 중량을 계산합니다(실측 검증 전 실험값).',
+          '땅콩처럼 흩어진 음식은 윤곽 안의 빈틈만큼 중량이 크게 나올 수 있습니다. 윤곽을 음식에 맞게 촘촘히 그려 주세요.',
+          style: TextStyle(fontSize: 12),
         ),
         if (busy) const LinearProgressIndicator(),
         if (message.isNotEmpty)
@@ -282,7 +349,7 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
             FilledButton.icon(
               onPressed: busy ? null : () => run(confirmRegion),
               icon: const Icon(Icons.check),
-              label: const Text('윤곽이 맞아요 (부피 계산)'),
+              label: const Text('윤곽이 맞아요 (중량 계산)'),
             ),
           if (confirmed)
             const Text('✓ 음식 윤곽 확인됨', style: TextStyle(color: Colors.green)),
@@ -305,7 +372,7 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
           ),
           FilledButton(
             onPressed: busy || !confirmed ? null : () => run(estimate),
-            child: const Text('③ 부피 다시 계산'),
+            child: const Text('③ 중량 다시 계산'),
           ),
         ],
         if (preview != null && baseRegion == null)
@@ -313,31 +380,51 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
             '접시 기준면: 음식 테두리 바로 바깥 띠에서 자동 계산. 부피가 이상하면 접시 영역을 직접 지정해 보세요.',
             style: TextStyle(fontSize: 12),
           ),
-        if (result != null) ...[
+        if (scale != null) ...[
           const SizedBox(height: 8),
           Text(
-            volume == null
-                ? '부피를 계산하지 못했습니다. 다시 촬영하거나 영역을 조정해 주세요.'
-                : '측정 부피: ${volume!.toStringAsFixed(1)} mL${held ? ' (품질 확인 필요)' : ''}',
+            '음식 면적 ${fixed(scale!['areaCm2'], 1)} cm² · 접시까지 ${fixed((scale!['distanceMm'] as num?)?.toDouble() == null ? null : (scale!['distanceMm'] as num) / 10, 1)} cm',
+          ),
+        ],
+        if (busy && confirmed && scale != null && height == null)
+          const Text('AI가 음식 평균 높이를 추정하는 중…'),
+        if (heightError.isNotEmpty)
+          Text(heightError, style: const TextStyle(color: Colors.red)),
+        if (height != null) ...[
+          Text(
+            '예상 중량: ${fixed(height!['grams'], 1)} g',
             style: Theme.of(context).textTheme.titleMedium,
           ),
-          for (final reason in (result!['holdReasons'] as List? ?? []))
-            Text('• $reason'),
-          if (volume != null)
-            FilledButton(
-              onPressed: busy
-                  ? null
-                  : () => Navigator.pop(context, {
-                      'volumeMl': volume,
-                      'qualityHold': held,
-                      'holdReasons': [
-                        for (final r in (result!['holdReasons'] as List? ?? []))
-                          r.toString(),
-                      ],
-                    }),
-              child: const Text('이 부피로 중량 적용'),
-            ),
+          Text(
+            '면적 ${fixed(height!['areaCm2'], 1)} cm² × AI 평균 높이 ${fixed(height!['heightCm'], 2)} cm '
+            '(3회: ${[for (final h in (height!['heightSamples'] as List? ?? [])) fixed(h, 2)].join(', ')}) '
+            '= ${fixed(height!['volumeMl'], 1)} mL × ${height!['densityGroupLabel']} 밀도 ${height!['densityGPerMl']} g/mL'
+            '${height!['majorCategory'] == null ? '' : ' (DB 분류: ${height!['majorCategory']})'}',
+            style: const TextStyle(fontSize: 12),
+          ),
+          FilledButton(
+            onPressed: busy
+                ? null
+                : () => Navigator.pop(context, {
+                    'method': 'AREA_HEIGHT',
+                    'areaCm2': height!['areaCm2'],
+                    'heightCm': height!['heightCm'],
+                    'heightSamples': height!['heightSamples'],
+                    'distanceMm': height!['distanceMm'],
+                    if (volume != null) 'depthVolumeMl': volume,
+                    'qualityHold': false,
+                    'holdReasons': const <String>[],
+                  }),
+            child: const Text('이 중량 적용'),
+          ),
         ],
+        if (result != null)
+          Text(
+            volume == null
+                ? '참고: 깊이 부피를 계산하지 못했습니다.'
+                : '참고: 깊이로 잰 부피 ${volume!.toStringAsFixed(1)} mL${held ? ' (품질 확인 필요)' : ''} — 중량 계산에는 쓰지 않습니다.',
+            style: const TextStyle(fontSize: 12, color: Colors.grey),
+          ),
       ],
     ),
   );

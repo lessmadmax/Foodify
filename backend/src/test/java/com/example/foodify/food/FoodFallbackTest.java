@@ -164,6 +164,26 @@ class FoodFallbackTest {
         assertThat(((com.fasterxml.jackson.databind.JsonNode)edited.get("items")).get(0).has("weightMeasurement")).isFalse();
         assertThatThrownBy(()->meals.update("ar-user","ar-meal",3,json.read("[{\"name\":\"김치볶음밥\",\"foodId\":\"rice\",\"arMeasurement\":{\"volumeMl\":-1}}]"))).hasMessageContaining("INVALID_AR_VOLUME");
     }
+    @Test void areaHeightWeightUsesAreaTimesHeightTimesCategoryDensity() {
+        db.update("INSERT INTO members(id,email,password_hash,goals,created_at) VALUES('ah-user','ah@test.invalid','unused','{}',0)");
+        db.update("INSERT INTO meals VALUES('ah-meal','ah-user','test',0,'INCOMPLETE',0,'[]','{}',0)");
+        var preview=meals.areaHeightPreview("김치볶음밥","rice",20,2.5);
+        assertThat(preview.get("volumeMl")).isEqualTo(50.0);
+        assertThat((BigDecimal)preview.get("grams")).isEqualByComparingTo("36.5");
+        assertThat(preview.get("densityGroup")).isEqualTo("RICE");
+        var result=meals.update("ah-user","ah-meal",0,json.read("[{\"name\":\"김치볶음밥\",\"foodId\":\"rice\",\"arMeasurement\":{\"method\":\"AREA_HEIGHT\",\"areaCm2\":20,\"heightCm\":2.5,\"heightSamples\":[2.2,2.5,3.1],\"distanceMm\":300,\"depthVolumeMl\":12.3}}]"));
+        var item=((com.fasterxml.jackson.databind.JsonNode)result.get("items")).get(0);
+        assertThat(item.path("grams").decimalValue()).isEqualByComparingTo("36.5");
+        var m=item.path("weightMeasurement");
+        assertThat(m.path("method").asText()).isEqualTo("AREA_HEIGHT");
+        assertThat(m.path("volumeMl").asDouble()).isEqualTo(50.0);
+        assertThat(m.path("depthVolumeMl").asDouble()).isEqualTo(12.3);
+        assertThat(m.path("heightSamples").size()).isEqualTo(3);
+        assertThat(m.path("volumeValidated").asBoolean()).isFalse();
+        var again=meals.update("ah-user","ah-meal",1,json.read("[{\"name\":\"김치볶음밥\",\"grams\":36.5,\"foodId\":\"rice\"}]"));
+        assertThat(((com.fasterxml.jackson.databind.JsonNode)again.get("items")).get(0).path("weightMeasurement").path("method").asText()).isEqualTo("AREA_HEIGHT");
+        assertThatThrownBy(()->meals.update("ah-user","ah-meal",2,json.read("[{\"name\":\"김치볶음밥\",\"foodId\":\"rice\",\"arMeasurement\":{\"method\":\"AREA_HEIGHT\",\"areaCm2\":20,\"heightCm\":40}}]"))).hasMessageContaining("INVALID_AR_HEIGHT");
+    }
     @Test void explicitSaveUpgradesOldServerMarkedFallbackButNotManualSelection() {
         db.update("INSERT INTO members(id,email,password_hash,goals,created_at) VALUES('category-user','category@test.invalid','unused','{}',0)");
         String previous="[{\"name\":\"무청김치\",\"grams\":50,\"foodId\":\"a\",\"source\":{\"matchType\":\"CATEGORY_FALLBACK\"}}]";
