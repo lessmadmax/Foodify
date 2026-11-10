@@ -26,6 +26,11 @@ class ArResearchBridge(private val activity:Activity,messenger:BinaryMessenger) 
     private val store=File(activity.filesDir,"ar-research").apply { mkdirs() }
     private val records=File(store,"records").apply { mkdirs() }
     private val models=File(store,"models").apply { mkdirs() }
+    /** ARCore point confidence (0–1) below this is ignored for the feature-point distance. */
+    private val FEATURE_MIN_CONFIDENCE=0.1
+    /** MobileSAM, loaded on first automatic outline. */
+    private val segmenterInit=lazy { SamSegmenter(activity) }
+    private val segmenter by segmenterInit
     @Volatile private var closed=false
     private var exportResult:MethodChannel.Result?=null
     private val archive=File(activity.cacheDir,"foodify-ar-export.zip")
@@ -54,6 +59,12 @@ class ArResearchBridge(private val activity:Activity,messenger:BinaryMessenger) 
                         "prepare" -> prepare(frame(input.getString("framePath")))
                         "estimate" -> estimate(input)
                         "foodFromBox" -> foodFromBox(input)
+                        "prepareSegment" -> segmenter.prepare(photo(frame(input.getString("framePath"))))
+                        "segmentPoints" -> {
+                            val taps=input.getJSONArray("points");require(taps.length() in 1..SamGeometry.MAX_POINTS) { "음식을 한 곳 이상 눌러 주세요." }
+                            val points=(0 until taps.length()).map { val p=taps.getJSONArray(it);require(p.length()==3);Triple(p.getDouble(0),p.getDouble(1),p.getInt(2)) }
+                            segmenter.segment(photo(frame(input.getString("framePath"))),points)
+                        }
                         "scale" -> scale(input)
                         "save" -> save(input)
                         "records" -> refreshRecords().map { clean(it) }
@@ -182,7 +193,26 @@ class ArResearchBridge(private val activity:Activity,messenger:BinaryMessenger) 
         val reference=observation(f)
         val siblings=f.parentFile!!.listFiles().orEmpty().filter {it.isDirectory && it.name.matches(Regex("frame-[0-9]{2}"))}.sortedBy {it.name}.take(10)
         val fused=runCatching {ArFusion.combine(reference,siblings.mapNotNull {runCatching {observation(it)}.getOrNull()}).frame}.getOrDefault(reference.frame)
-        return ArVolume.scale(fused,food,base)
+        val points=featurePoints(siblings,reference.pose)
+        return ArVolume.scale(fused,food,base,points)+mapOf("featurePointCount" to points.size)
+    }
+    /**
+     * ARCore feature points of the session frames, one per id (latest frame wins), in the reference camera's
+     * coordinates (mm). Older sessions without point-cloud files give none.
+     */
+    private fun featurePoints(frames:List<File>,reference:ArFusion.Pose):List<ArVolume.V> {
+        val byId=linkedMapOf<Int,ArVolume.V>()
+        for(folder in frames) runCatching {
+            val p=File(folder,"point-cloud.f32le");val q=File(folder,"point-cloud-ids.i32le")
+            if(!p.exists() || !q.exists()) return@runCatching
+            val pb=ByteBuffer.wrap(p.readBytes()).order(ByteOrder.LITTLE_ENDIAN);val qb=ByteBuffer.wrap(q.readBytes()).order(ByteOrder.LITTLE_ENDIAN)
+            val n=minOf(pb.remaining()/16,qb.remaining()/4)
+            repeat(n) {
+                val x=pb.float.toDouble();val y=pb.float.toDouble();val z=pb.float.toDouble();val confidence=pb.float.toDouble();val id=qb.int
+                if(confidence>=FEATURE_MIN_CONFIDENCE && x.isFinite() && y.isFinite() && z.isFinite()) byId[id]=reference.camera(ArVolume.V(x*1000,y*1000,z*1000))
+            }
+        }
+        return byId.values.toList()
     }
     private fun estimate(input:JSONObject):Map<String,Any?> {
         val f=frame(input.getString("framePath"));val food=input.optString("foodName").trim();var result:Map<String,Any?>
@@ -288,5 +318,9 @@ class ArResearchBridge(private val activity:Activity,messenger:BinaryMessenger) 
             catch(e:Exception) {activity.runOnUiThread {if(!closed)result.error("EXPORT_FAILED",e.message,null)}}
         }
     }
-    fun dispose() {closed=true;channel.setMethodCallHandler(null);worker.shutdown()}
+    fun dispose() {
+        closed=true;channel.setMethodCallHandler(null)
+        if(segmenterInit.isInitialized()) worker.execute { segmenter.close() }
+        worker.shutdown()
+    }
 }

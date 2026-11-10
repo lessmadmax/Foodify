@@ -78,6 +78,82 @@ class ArVolumeTest {
         assertEquals("base_region",ArVolume.scale(frame(),food,base)["distanceSource"])
         assertThrows(IllegalArgumentException::class.java) { ArVolume.scale(frame().copy(depth=IntArray(6400)),food,emptyList()) }
     }
+    @Test fun scaleIgnoresLowConfidencePlateNoise() {
+        // Every other plate pixel is far, low-confidence noise (white desk): the distance stays on confident 500 mm.
+        val f=frame();val depth=f.depth.copyOf();val confidence=f.confidence.copyOf()
+        for(i in depth.indices) if(depth[i]==500 && i%2==0) {depth[i]=4000;confidence[i]=3}
+        assertEquals(500.0,ArVolume.scale(f.copy(depth=depth,confidence=confidence),food,base)["distanceMm"] as Double,1e-9)
+    }
+    @Test fun scaleRefusesWhenPlateDepthAndFeaturePointsAreMissing() {
+        val f=frame()
+        val e=assertThrows(IllegalArgumentException::class.java) { ArVolume.scale(f.copy(confidence=IntArray(6400){3}),food,base) }
+        assertTrue(e.message!!.contains("특징점"))
+    }
+    /** Camera-space point (mm) that projects to normalized image (u,v) at depth z for the test frame (fx=100, cx=40, 80px). */
+    private fun pointAt(u:Double,v:Double,z:Double)=ArVolume.V((u*80-40)/100*z,(v*80-40)/100*z,z)
+    @Test fun whitePlateFallsBackToFeaturePointsOnPlate() {
+        // No confident plate depth (white bowl); feature points on the plate band at 300 mm, a few on the food top at 280 mm.
+        val white=frame().copy(confidence=IntArray(6400){3})
+        val points=(0 until 8).map { pointAt(.3,.3+it*.05,300.0) }+(0 until 3).map { pointAt(.5,.45+it*.05,280.0) }+
+            (0 until 8).map { pointAt(.05,.1+it*.1,900.0) } // far from the food: ignored
+        val r=ArVolume.scale(white,food,emptyList(),points)
+        assertEquals("feature_points_plate",r["distanceSource"])
+        assertEquals(300.0,r["distanceMm"] as Double,1e-9)
+        assertEquals(8,r["plateSamples"])
+        // Area follows the feature distance: 400 px × (300/100 mm)² = 36 cm².
+        assertEquals(36.0,r["areaCm2"] as Double,1e-6)
+    }
+    @Test fun onlyFoodFeaturePointsGiveFoodTopDistance() {
+        val white=frame().copy(confidence=IntArray(6400){3})
+        val r=ArVolume.scale(white,food,base,(0 until 6).map { pointAt(.45+it*.02,.5,280.0) })
+        assertEquals("feature_points_food",r["distanceSource"])
+        assertEquals(280.0,r["distanceMm"] as Double,1e-9)
+    }
+    @Test fun confidentPlateDepthStillWinsOverFeaturePoints() {
+        val r=ArVolume.scale(frame(),food,emptyList(),(0 until 8).map { pointAt(.2,.2+it*.08,300.0) })
+        assertEquals("auto_band",r["distanceSource"])
+        assertEquals(500.0,r["distanceMm"] as Double,1e-9)
+    }
+    @Test fun measuredHeightFromConfidentFoodDepth() {
+        // Test frame: plate 500 mm, food block 450 mm -> 50 mm high over the whole outline.
+        val r=ArVolume.scale(frame(),food,emptyList())
+        assertEquals("DEPTH",r["measuredHeightSource"])
+        assertEquals(5.0,r["measuredHeightCm"] as Double,1e-9)
+        assertEquals(400,r["measuredHeightSamples"])
+    }
+    @Test fun measuredHeightFallsBackToFoodFeaturePoints() {
+        // Plate depth is confident, food depth is not; six feature points sit 20 mm above the plate.
+        val f=frame();val confidence=IntArray(6400) {i->if(f.depth[i]==450)3 else 255}
+        val points=(0 until 6).map { pointAt(.45+it*.02,.5,480.0) }
+        val r=ArVolume.scale(f.copy(confidence=confidence),food,emptyList(),points)
+        assertEquals("FEATURE_POINTS",r["measuredHeightSource"])
+        assertEquals(2.0,r["measuredHeightCm"] as Double,1e-9)
+    }
+    @Test fun noMeasuredHeightWithoutSamplesOrFromFoodTopDistance() {
+        val f=frame();val confidence=IntArray(6400) {i->if(f.depth[i]==450)3 else 255}
+        val r=ArVolume.scale(f.copy(confidence=confidence),food,emptyList())
+        assertNull(r["measuredHeightCm"])
+        assertEquals(0,r["measuredHeightSamples"])
+        // Distance from food-top feature points: height cannot be measured.
+        val white=f.copy(confidence=IntArray(6400){3})
+        val top=ArVolume.scale(white,food,base,(0 until 6).map { pointAt(.45+it*.02,.5,280.0) })
+        assertEquals("feature_points_food",top["distanceSource"])
+        assertNull(top["measuredHeightCm"])
+    }
+    @Test fun flatFoodBelowOneMillimetreUsesAiHeight() {
+        val flat=frame().copy(depth=IntArray(6400){500})
+        assertNull(ArVolume.scale(flat,food,emptyList())["measuredHeightCm"])
+    }
+    @Test fun featurePointsBehindCameraOrOutsideImageAreIgnored() {
+        val white=frame().copy(confidence=IntArray(6400){3})
+        val bad=(0 until 8).map { ArVolume.V(0.0,0.0,-300.0) }+(0 until 8).map { pointAt(1.5,.5,300.0) }
+        assertThrows(IllegalArgumentException::class.java) { ArVolume.scale(white,food,emptyList(),bad) }
+    }
+    @Test fun scaleRefusesImplausibleDistance() {
+        val far=frame().copy(depth=IntArray(6400){2706})
+        val e=assertThrows(IllegalArgumentException::class.java) { ArVolume.scale(far,food,base) }
+        assertTrue(e.message!!.contains("270.6cm"))
+    }
     @Test fun convexHullDropsInteriorPoints() {
         val hull=ArVolume.convexHull(listOf(Pair(0.0,0.0),Pair(1.0,0.0),Pair(1.0,1.0),Pair(0.0,1.0),Pair(.5,.5)))
         assertEquals(4,hull.size);assertFalse(hull.contains(Pair(.5,.5)))

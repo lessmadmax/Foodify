@@ -37,7 +37,10 @@ public class AppController {
         return consentService.accept(p.getName(),body.path("version").asText());
     }
     @DeleteMapping("/me/ai-consent") public Object revokeConsent(Principal p) {return consentService.revoke(p.getName());}
-    @GetMapping("/foods") public Object foods(@RequestParam String query) {return foods.search(query);}
+    @GetMapping("/foods") public Object foods(@RequestParam String query,@RequestParam(required=false) String scope) {
+        return "processed".equals(scope)?foods.searchProcessed(query):foods.search(query);
+    }
+    @GetMapping("/foods/kinds") public Object foodKinds(@RequestParam String foodId) {return foods.kinds(foodId);}
     @GetMapping("/meals") public Object list(Principal p) {return meals.list(p.getName());}
     @GetMapping("/meals/{id}") public Object meal(Principal p,@PathVariable String id) {return meals.get(p.getName(),id);}
     @PostMapping(value="/meals",consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -91,6 +94,17 @@ public class AppController {
      * AR weight (area × height, M12): asks the AI for the mean height 3 times in parallel, takes the
      * median, and previews grams = area × height × category density. The meal save recomputes it.
      */
+    /** Preview with a height measured on the device (depth or feature points): no AI call. */
+    @PostMapping("/ar/preview") public Object arPreview(@RequestBody JsonNode body) {
+        String name=body.path("foodName").asText("").trim();
+        double area=body.path("areaCm2").asDouble(Double.NaN),height=body.path("heightCm").asDouble(Double.NaN);
+        if(name.isEmpty()||name.length()>100||!(area>0&&area<=MealService.MAX_AREA_CM2)||!(height>0&&height<=MealService.MAX_HEIGHT_CM))
+            throw ApiError.bad("INVALID_FOOD_HEIGHT_REQUEST");
+        var result=new LinkedHashMap<String,Object>(meals.areaHeightPreview(name,body.path("foodId").asText(""),area,height));
+        result.put("heightCm",height); result.put("areaCm2",area);
+        if(body.path("distanceMm").isNumber()) result.put("distanceMm",body.path("distanceMm").asDouble());
+        return result;
+    }
     @PostMapping("/ar/height") public Object foodHeight(Principal p,@RequestBody JsonNode body) {
         AiConsent.require(db,p.getName());
         String name=body.path("foodName").asText("").trim(),encoded=body.path("imageBase64").asText("");

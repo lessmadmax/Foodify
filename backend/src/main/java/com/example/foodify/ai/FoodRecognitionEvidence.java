@@ -29,5 +29,27 @@ public final class FoodRecognitionEvidence {
         }
         return Map.of("model","Food-101-93M","revision",root.path("revision").asText(),"predictions",clean);
     }
+    /**
+     * Prompt copy of normalized evidence. An image whose top score is below {@code minTopScore} loses its
+     * candidates and is marked {@code LOW_TOP_SCORE}: foods outside the 101 classes (peanuts, rice, cookies)
+     * scored 0.05~0.53 on PC while correct in-class photos scored 0.65 or more, and a wrong candidate list
+     * pulled the AI toward a wrong name. Stored capture_info keeps every candidate and score.
+     */
+    @SuppressWarnings("unchecked")
+    public static Map<String,Object> forPrompt(Map<String,Object> evidence, double minTopScore) {
+        if(!(evidence.get("foodRecognition") instanceof Map<?,?> recognition)) return evidence;
+        var predictions=new ArrayList<Map<String,Object>>();
+        for(var prediction:(List<Map<String,Object>>)recognition.get("predictions")) {
+            var candidates=(List<Map<String,Object>>)prediction.get("candidates");
+            double top=candidates.isEmpty()?0:((Number)candidates.getFirst().get("score")).doubleValue();
+            predictions.add(top>=minTopScore ? prediction
+                : Map.of("imageIndex",prediction.get("imageIndex"),"candidates",List.of(),"candidatesExcluded","LOW_TOP_SCORE"));
+        }
+        var copy=new LinkedHashMap<String,Object>((Map<String,Object>)recognition);
+        copy.put("predictions",predictions);
+        var result=new LinkedHashMap<>(evidence);
+        result.put("foodRecognition",copy);
+        return result;
+    }
     private static void invalid() {throw ApiError.bad("INVALID_FOOD_RECOGNITION");}
 }

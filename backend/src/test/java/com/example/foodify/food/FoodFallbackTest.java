@@ -140,6 +140,51 @@ class FoodFallbackTest {
         assertThat(foods.search("아몬드_볶은것").getFirst().get("id")).isEqualTo("almond-roast");
         assertThat(foods.search("카라멜아몬드").getFirst().get("id")).isEqualTo("bread");
     }
+    @Test void categoryWordUsesRawMajorMedianAndOffersKinds() {
+        insertRaw("peanut-dry","땅콩_말린것","견과 및 종실류","땅콩","말린것",520,30);
+        insertRaw("peanut-roast","땅콩_볶은것","견과 및 종실류","땅콩","볶은것",567,31);
+        insertRaw("almond-roast","아몬드_볶은것","견과 및 종실류","아몬드","볶은것",594,32);
+        insertRaw("chestnut-fresh","밤_생것","견과 및 종실류","밤","생것",160,33);
+        insertRaw("chestnut-dry","밤_말린것","견과 및 종실류","밤","말린것",350,34);
+        insertRaw("apple","사과_생것","과일류","사과","생것",50,35);
+        insert("anchovy-nuts","멸치볶음_견과류","반찬류","멸치볶음",100,414,36);
+        // "견과류" is the raw major median, not a dish that contains the word.
+        var nuts=foods.search("견과류");
+        assertThat(nuts).hasSize(1);
+        var major=nuts.getFirst();
+        assertThat(major.get("samplePolicy")).isEqualTo("RAW_MAJOR");
+        assertThat(major.get("majorCategory")).isEqualTo("견과 및 종실류");
+        // Each representative keeps its own rule: chestnut fresh only, peanut/almond every state.
+        assertThat(major.get("memberIds").toString()).contains("peanut-dry","peanut-roast","almond-roast","chestnut-fresh")
+            .doesNotContain("chestnut-dry","apple","anchovy-nuts");
+        assertThat(major.get("kcal")).isEqualTo(new BigDecimal("543.5000"));
+        assertThat(foods.search("견과").getFirst().get("id")).isEqualTo(major.get("id"));
+        assertThat(DensityGroups.of(categories.majorOf(major.get("id").toString())).id()).isEqualTo("NUT");
+        var saved=foods.calculate(json.read(json.write(Map.of("name","견과류","grams",10))));
+        assertThat(saved.get("status")).isEqualTo("COMPLETE");
+        // Kinds: other representatives in the same major, each with the name that reproduces its match.
+        String almondId=foods.search("아몬드").getFirst().get("id").toString();
+        var kinds=(java.util.List<?>)categories.kinds(almondId).get("kinds");
+        var queries=kinds.stream().map(k->(Object)((Map<?,?>)k).get("query")).toList();
+        assertThat(queries).containsExactly("땅콩","밤");
+        var peanut=(Map<?,?>)((Map<?,?>)kinds.getFirst()).get("food");
+        var picked=foods.calculate(json.read(json.write(Map.of("name","땅콩","grams",10,"foodId",peanut.get("id")))));
+        assertThat(picked.get("status")).isEqualTo("COMPLETE");
+        assertThat((java.util.List<?>)categories.kinds(major.get("id").toString()).get("kinds")).hasSize(3);
+        assertThat((java.util.List<?>)categories.kinds("peanut-roast").get("kinds")).hasSize(2);
+        // Dishes and unknown ids have no kinds.
+        assertThat((java.util.List<?>)categories.kinds("anchovy-nuts").get("kinds")).isEmpty();
+        assertThat((java.util.List<?>)categories.kinds("category:unknown").get("kinds")).isEmpty();
+    }
+    @Test void processedScopeSearchesOnlyProcessedFoods() {
+        insertRaw("peanut-roast","땅콩_볶은것","견과 및 종실류","땅콩","볶은것",567,40);
+        insert("coffee-peanut","헤이즐넛향커피땅콩","과자류","땅콩",100,478,41);
+        db.update("UPDATE foods SET category='가공식품' WHERE id='coffee-peanut'");
+        insert("peanut-side","땅콩조림","반찬류","조림",100,300,42);
+        assertThat(foods.search("땅콩").getFirst().get("matchType")).isEqualTo("CATEGORY_FALLBACK");
+        var processed=foods.searchProcessed("땅콩");
+        assertThat(processed.stream().map(r->(Object)r.get("id")).toList()).containsExactly("coffee-peanut");
+    }
     @Test void duplicatesInSourceRowsDoNotIncreaseSampleCount() {
         db.update("INSERT INTO nutrition_source_rows SELECT dataset_id,99,version_id,raw_json FROM nutrition_source_rows WHERE row_number=1");
         assertThat(foods.search("무청김치").getFirst().get("sampleCount")).isEqualTo(2);
@@ -182,7 +227,17 @@ class FoodFallbackTest {
         assertThat(m.path("volumeValidated").asBoolean()).isFalse();
         var again=meals.update("ah-user","ah-meal",1,json.read("[{\"name\":\"김치볶음밥\",\"grams\":36.5,\"foodId\":\"rice\"}]"));
         assertThat(((com.fasterxml.jackson.databind.JsonNode)again.get("items")).get(0).path("weightMeasurement").path("method").asText()).isEqualTo("AREA_HEIGHT");
+        assertThat(m.path("heightMethod").asText()).isEqualTo("AI");
         assertThatThrownBy(()->meals.update("ah-user","ah-meal",2,json.read("[{\"name\":\"김치볶음밥\",\"foodId\":\"rice\",\"arMeasurement\":{\"method\":\"AREA_HEIGHT\",\"areaCm2\":20,\"heightCm\":40}}]"))).hasMessageContaining("INVALID_AR_HEIGHT");
+        // Device-measured height is recorded with its source; unknown methods fall back to the AI label.
+        var measured=meals.update("ah-user","ah-meal",2,json.read("[{\"name\":\"김치볶음밥\",\"foodId\":\"rice\",\"arMeasurement\":{\"method\":\"AREA_HEIGHT\",\"areaCm2\":20,\"heightCm\":1.2,\"heightMethod\":\"DEPTH\",\"heightSampleCount\":350}}]"));
+        var mm=((com.fasterxml.jackson.databind.JsonNode)measured.get("items")).get(0).path("weightMeasurement");
+        assertThat(mm.path("heightMethod").asText()).isEqualTo("DEPTH");
+        assertThat(mm.path("heightSource").asText()).contains("깊이");
+        assertThat(mm.path("heightSampleCount").asInt()).isEqualTo(350);
+        assertThat(mm.path("volumeMl").asDouble()).isEqualTo(24.0);
+        var spoofed=meals.update("ah-user","ah-meal",3,json.read("[{\"name\":\"김치볶음밥\",\"foodId\":\"rice\",\"arMeasurement\":{\"method\":\"AREA_HEIGHT\",\"areaCm2\":20,\"heightCm\":1.2,\"heightMethod\":\"SCALE\"}}]"));
+        assertThat(((com.fasterxml.jackson.databind.JsonNode)spoofed.get("items")).get(0).path("weightMeasurement").path("heightMethod").asText()).isEqualTo("AI");
     }
     @Test void explicitSaveUpgradesOldServerMarkedFallbackButNotManualSelection() {
         db.update("INSERT INTO members(id,email,password_hash,goals,created_at) VALUES('category-user','category@test.invalid','unused','{}',0)");

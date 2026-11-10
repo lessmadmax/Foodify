@@ -136,6 +136,10 @@ String errorText(Object e) {
       'GOAL_SCOPE_CONFIRMATION_REQUIRED' =>
         '자동 목표는 만 19~78세 일반 성인 기준입니다. 적용 범위를 확인해 주세요.',
       'AI_BUDGET_REACHED' => '이번 달 AI 요청 한도에 도달했습니다.',
+      'INVALID_FOOD_HEIGHT_REQUEST' =>
+        '측정한 거리·면적이 정상 범위를 벗어났습니다. 무늬 있는 매트나 접시 위에서 다시 촬영해 주세요.',
+      'OPENAI_UNAVAILABLE' || 'AI_INVALID_OUTPUT' =>
+        'AI 응답을 받지 못했습니다. 잠시 후 다시 시도해 주세요.',
       'STALE_VERSION' => '기록이 변경되었습니다. 새로고침 후 수정해 주세요.',
       'UNAUTHORIZED' => '로그인이 만료되었습니다. 다시 로그인해 주세요.',
       'ALREADY_EXISTS' => '이미 등록된 이메일입니다.',

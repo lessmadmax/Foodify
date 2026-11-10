@@ -1,0 +1,18 @@
+{
+ "model": "MobileSAM vit_t",
+ "sourceRepository": "ChaoningZhang/MobileSAM",
+ "sourceRevision": "f706ad9c4eb7f219c00d9050e46328518ffb65d2",
+ "weights": "weights/mobile_sam.pt",
+ "export": "torch.onnx opset 17; encoder = image_encoder only (1x3x1024x1024, normalized+padded input), decoder = mobile_sam.utils.onnx.SamOnnxModel(return_single_mask=True)",
+ "verifiedAgainstTorch": "M12 records, box prompt, mask IoU 0.85~0.997 (2026-11-10)",
+ "files": {
+  "mobile_sam_encoder.onnx": {
+   "bytes": 28016465,
+   "sha256": "28ab08ab810ab87988078c7f7bb3e36dc2067092ec576c4b3b82f1e3032f1693"
+  },
+  "mobile_sam_decoder.onnx": {
+   "bytes": 16501718,
+   "sha256": "7d26e059326d7fc13d06036b9bc28af2a853ce8761c55d2d5c6837d3587d7767"
+  }
+ }
+}

@@ -389,6 +389,22 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
                     fullTimestamp=full.timestamp;fullWidth=full.width;fullHeight=full.height
                 }
             } catch(e:Exception) {fullError=e.javaClass.simpleName}
+            // ARCore feature points (world metres + confidence, with ids): distance fallback when the plate
+            // surface is too plain for depth (white bowls/desks).
+            var pointCount=0;var pointError:String?=null
+            try {
+                frame.acquirePointCloud().use { cloud ->
+                    val points=cloud.points;val ids=cloud.ids
+                    pointCount=minOf(points.remaining()/4,ids.remaining())
+                    val p=java.nio.ByteBuffer.allocate(pointCount*16).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    val q=java.nio.ByteBuffer.allocate(pointCount*4).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    for(k in 0 until pointCount) {
+                        for(j in 0 until 4) p.putFloat(points.get(points.position()+k*4+j))
+                        q.putInt(ids.get(ids.position()+k))
+                    }
+                    files["point-cloud.f32le"]=p.array();files["point-cloud-ids.i32le"]=q.array()
+                }
+            } catch(e:Exception) {pointError=e.javaClass.simpleName;pointCount=0}
             val planeInfo = JSONArray()
             cameraImage.planes.forEachIndexed { i, p ->
                 val w = if(i == 0) cameraImage.width else (cameraImage.width+1)/2
@@ -412,6 +428,9 @@ class ArDiagnosticActivity : Activity(), GLSurfaceView.Renderer {
                 .put("fullDepthTimestampNs",fullTimestamp?.toString() ?: JSONObject.NULL)
                 .put("fullDepthWidth",fullWidth ?: JSONObject.NULL).put("fullDepthHeight",fullHeight ?: JSONObject.NULL)
                 .put("fullDepthError",fullError ?: JSONObject.NULL)
+                .put("pointCloudPoints",pointCount)
+                .put("pointCloudCoordinates","arcore_world_metres_xyz_confidence")
+                .put("pointCloudError",pointError ?: JSONObject.NULL)
                 .put("frameTimestampNs",frame.timestamp.toString())
                 .put("depthTimestampNs",depth.timestamp.toString())
                 .put("confidenceTimestampNs",confidenceTimestamp.toString())

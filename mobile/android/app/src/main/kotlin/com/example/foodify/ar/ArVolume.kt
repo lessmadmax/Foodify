@@ -152,11 +152,75 @@ object ArVolume {
     }
     const val SCALE_MIN_PLATE_SAMPLES=20
     /**
-     * Area × height method (M12): real top-view scale only, no per-pixel food height.
-     * Plate distance = median depth of the base region minus the food, or of the band just outside the
-     * food outline when no base region is drawn. Area assumes a straight top-down view at that distance.
+     * Plate depth below this ARCore confidence (0–255) is ignored for the distance. On a plain white desk
+     * (S23, 2026-11-09) almost every plate pixel had confidence < 32 and depth scattered 0.9–5.5 m, giving a
+     * 2706 mm distance for food ~220 mm away; earlier correct sessions kept hundreds of pixels at >= 32.
      */
-    fun scale(f:Frame,food:List<List<Pair<Double,Double>>>,base:List<List<Pair<Double,Double>>>):Map<String,Any?> {
+    const val SCALE_MIN_CONFIDENCE=32
+    /** Plausible top-down capture distance; outside it the scale is refused instead of sent. */
+    const val SCALE_MIN_DISTANCE_MM=100.0
+    const val SCALE_MAX_DISTANCE_MM=1000.0
+    /** Fewest ARCore feature points for a distance; they are sparse but sit on textured food and rims. */
+    const val SCALE_MIN_FEATURE_POINTS=6
+    /** Feature points this far (image-normalized) outside the food's bounding box still count as "around the food". */
+    const val FEATURE_NEAR_FOOD=0.15
+    private fun median(sorted:List<Double>)=if(sorted.size%2==1) sorted[sorted.size/2] else (sorted[sorted.size/2-1]+sorted[sorted.size/2])/2
+    /**
+     * Distance from ARCore feature points (camera coordinates, mm; x right, y down, z forward) when plate depth
+     * is missing. Plate points (base region minus food, or near the food when no base region) first; otherwise
+     * points on and around the food, which sit on the food top and make the distance slightly short.
+     */
+    internal fun featureDistance(f:Frame,food:List<List<Pair<Double,Double>>>,base:List<List<Pair<Double,Double>>>,points:List<V>):Triple<Double,String,Int>? {
+        val xs=food.flatten().map {it.first};val ys=food.flatten().map {it.second}
+        val near={u:Double,v:Double -> u in xs.min()-FEATURE_NEAR_FOOD..xs.max()+FEATURE_NEAR_FOOD && v in ys.min()-FEATURE_NEAR_FOOD..ys.max()+FEATURE_NEAR_FOOD}
+        val plate=mutableListOf<Double>();val around=mutableListOf<Double>()
+        for(p in points) {
+            if(!(p.z>0) || !p.x.isFinite() || !p.y.isFinite()) continue
+            val u=(p.x/p.z*f.fx+f.cx)/f.imageWidth;val v=(p.y/p.z*f.fy+f.cy)/f.imageHeight
+            if(u !in 0.0..1.0 || v !in 0.0..1.0) continue
+            val onFood=mask(u,v,food)
+            val onPlate=!onFood && if(base.isNotEmpty()) mask(u,v,base) else near(u,v)
+            if(onPlate) plate.add(p.z)
+            if(onFood || near(u,v)) around.add(p.z)
+        }
+        if(plate.size>=SCALE_MIN_FEATURE_POINTS) return Triple(median(plate.sorted()),"feature_points_plate",plate.size)
+        if(around.size>=SCALE_MIN_FEATURE_POINTS) return Triple(median(around.sorted()),"feature_points_food",around.size)
+        return null
+    }
+    /** Measured food height: fewest confident food depth pixels, and the share of the food they must cover. */
+    const val MEASURED_MIN_FOOD_SAMPLES=20
+    const val MEASURED_MIN_FOOD_COVERAGE=0.3
+    /** A measured mean height under 1 mm is depth noise; the AI height is used instead. */
+    const val MEASURED_MIN_HEIGHT_MM=1.0
+    const val MEASURED_MAX_HEIGHT_MM=300.0
+    /** Depth (mm) of feature points that project inside the food outline. */
+    internal fun featureFoodDepths(f:Frame,food:List<List<Pair<Double,Double>>>,points:List<V>)=points.mapNotNull { p ->
+        if(!(p.z>0) || !p.x.isFinite() || !p.y.isFinite()) return@mapNotNull null
+        val u=(p.x/p.z*f.fx+f.cx)/f.imageWidth;val v=(p.y/p.z*f.fy+f.cy)/f.imageHeight
+        if(u in 0.0..1.0 && v in 0.0..1.0 && mask(u,v,food)) p.z else null
+    }
+    /**
+     * Mean food height (mm) above the plate at distance [plate]: confident depth over the food outline first
+     * (outline gaps show the plate and count as ~0), otherwise feature points on the food. Null when neither
+     * has enough samples or the mean is below 1 mm. Heights below the plate count as 0.
+     */
+    internal fun measuredHeight(f:Frame,fm:BooleanArray,valid:BooleanArray,plate:Double,food:List<List<Pair<Double,Double>>>,points:List<V>):Triple<Double,String,Int>? {
+        val foodPixels=fm.count {it}
+        val depthHeights=fm.indices.filter { fm[it] && valid[it] }.map { (plate-f.depth[it]).coerceIn(0.0,MEASURED_MAX_HEIGHT_MM) }
+        val fromDepth=depthHeights.size>=MEASURED_MIN_FOOD_SAMPLES && foodPixels>0 && depthHeights.size.toDouble()/foodPixels>=MEASURED_MIN_FOOD_COVERAGE
+        val heights=if(fromDepth) depthHeights else featureFoodDepths(f,food,points).map { (plate-it).coerceIn(0.0,MEASURED_MAX_HEIGHT_MM) }
+        if(!fromDepth && heights.size<SCALE_MIN_FEATURE_POINTS) return null
+        val mean=heights.average()
+        if(!(mean>=MEASURED_MIN_HEIGHT_MM)) return null
+        return Triple(mean,if(fromDepth) "DEPTH" else "FEATURE_POINTS",heights.size)
+    }
+    /**
+     * Area × height method (M12): real top-view scale only, no per-pixel food height.
+     * Plate distance = median confident depth of the base region minus the food, or of the band just outside
+     * the food outline when no base region is drawn. When that surface is too plain for depth (white bowls),
+     * ARCore feature points around the food give the distance instead. Area assumes a straight top-down view.
+     */
+    fun scale(f:Frame,food:List<List<Pair<Double,Double>>>,base:List<List<Pair<Double,Double>>>,points:List<V> = emptyList()):Map<String,Any?> {
         validate(food);if(base.isNotEmpty())validate(base)
         val count=f.width*f.height;val uv=mapper(f)
         val fm=BooleanArray(count);val bm=BooleanArray(count);val valid=BooleanArray(count)
@@ -166,18 +230,28 @@ object ArVolume {
             inside[i]=u.first in 0.0..1.0 && u.second in 0.0..1.0
             fm[i]=mask(u.first,u.second,food);bm[i]=base.isNotEmpty() && mask(u.first,u.second,base)
             px[i]=u.first*f.imageWidth;py[i]=u.second*f.imageHeight
-            valid[i]=f.depth[i]>0 && inside[i]
+            valid[i]=f.depth[i]>0 && inside[i] && f.confidence[i]>=SCALE_MIN_CONFIDENCE
         }
         val plate=if(base.isNotEmpty()) BooleanArray(count) { bm[it] && !fm[it] }
             else autoBand(f.width,f.height,fm,px,py,inside,AUTO_BAND_INNER*f.imageWidth,AUTO_BAND_OUTER*f.imageWidth)
         val depths=(0 until count).filter { plate[it] && valid[it] }.map { f.depth[it].toDouble() }.sorted()
-        if(depths.size<SCALE_MIN_PLATE_SAMPLES) fail("음식 주변 접시 면의 깊이를 확인하지 못했습니다. 밝은 곳에서 좌우로 조금 움직이며 다시 촬영해 주세요.")
-        val z=if(depths.size%2==1) depths[depths.size/2] else (depths[depths.size/2-1]+depths[depths.size/2])/2
+        val z:Double;val source:String;val samples:Int
+        if(depths.size>=SCALE_MIN_PLATE_SAMPLES) {
+            z=median(depths);source=if(base.isNotEmpty()) "base_region" else "auto_band";samples=depths.size
+        } else {
+            val feature=featureDistance(f,food,base,points)
+                ?: fail("음식 주변의 깊이와 특징점을 충분히 잡지 못했습니다. 음식 바로 위에서 좌우로 천천히 조금 더 움직이며 다시 촬영해 주세요.")
+            z=feature.first;source=feature.second;samples=feature.third
+        }
+        if(z<SCALE_MIN_DISTANCE_MM || z>SCALE_MAX_DISTANCE_MM) fail("접시까지 거리가 ${String.format(java.util.Locale.ROOT,"%.1f",z/10)}cm로 비정상입니다. 음식에서 20~50cm 위에서 다시 촬영해 주세요.")
         val areaFraction=food.sumOf { polygon -> abs(polygon.indices.sumOf { k -> val a=polygon[k];val b=polygon[(k+1)%polygon.size];a.first*b.second-b.first*a.second })/2 }
         val areaMm2=areaFraction*f.imageWidth*f.imageHeight*(z/f.fx)*(z/f.fy)
         val mm=z/((f.fx+f.fy)/2)
-        return mapOf("distanceMm" to z,"distanceSource" to if(base.isNotEmpty()) "base_region" else "auto_band","plateSamples" to depths.size,
-            "areaCm2" to areaMm2/100,"mmPerPixel" to mm,"photoWidthCm" to f.imageWidth*mm/10,"photoHeightCm" to f.imageHeight*mm/10)
+        // Food height needs a plate-level distance; a distance taken on the food top cannot give it.
+        val measured=if(source=="feature_points_food") null else measuredHeight(f,fm,valid,z,food,points)
+        return mapOf("distanceMm" to z,"distanceSource" to source,"plateSamples" to samples,"confidentPlateDepthSamples" to depths.size,
+            "areaCm2" to areaMm2/100,"mmPerPixel" to mm,"photoWidthCm" to f.imageWidth*mm/10,"photoHeightCm" to f.imageHeight*mm/10,
+            "measuredHeightCm" to measured?.let { it.first/10 },"measuredHeightSource" to measured?.second,"measuredHeightSamples" to (measured?.third ?: 0))
     }
     internal fun convexHull(input:List<Pair<Double,Double>>):List<Pair<Double,Double>> {
         val p=input.distinct().sortedWith(compareBy({ it.first },{ it.second }))

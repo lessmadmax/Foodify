@@ -17,6 +17,9 @@ app:
     region: ${AWS_REGION:ap-northeast-2}
   photos: ${PHOTO_DIRECTORY:./data/photos}
   worker-enabled: ${WORKER_ENABLED:true}
+  food-recognition:
+    # Food-101 top-1 score below this: candidates are left out of the analysis prompt (W01)
+    min-top-score: ${FOOD_RECOGNITION_MIN_TOP_SCORE:0.6}
   openai:
     api-key: ${OPENAI_API_KEY:}
     model: ${OPENAI_MODEL:gpt-4o-mini}

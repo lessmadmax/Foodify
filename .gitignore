@@ -25,3 +25,4 @@ data/food-images/
 scripts/__pycache__/
 
 /mobile/android/app/src/main/assets/food101/food101.onnx
+/mobile/android/app/src/main/assets/mobilesam/*.onnx

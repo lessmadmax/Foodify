@@ -20,6 +20,13 @@ import 'food_region_screen.dart';
 
 String date(DateTime d) =>
     '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+/// Height source of an AREA_HEIGHT measurement (older records have no heightMethod and used AI).
+String measuredHeightName(Map measurement) => switch (measurement['heightMethod']) {
+  'DEPTH' => '깊이 측정 높이',
+  'FEATURE_POINTS' => '특징점 측정 높이',
+  _ => 'AI 평균 높이',
+};
+
 String foodDisplayName(Map item) {
   final name = item['name'];
   return name is String && name.trim().isNotEmpty ? name.trim() : '음식명 확인 필요';
@@ -897,6 +904,12 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
   bool saving = false, conflict = false;
   int loadGeneration = 0, formGeneration = 0;
   bool busy = false, dirty = false, loading = false;
+
+  /// Other kinds in the same raw-ingredient category (땅콩 → 아몬드, 호두 …), by foodId.
+  final Map<String, List<Map<String, dynamic>>> kindsByFood = {};
+  final Set<String> kindsRequested = {};
+  final Set<int> kindsExpanded = {};
+  static const shownKinds = 8;
   @override
   void initState() {
     super.initState();
@@ -948,6 +961,89 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
         .toList();
     formGeneration++;
     error = null;
+    kindsExpanded.clear();
+    Future.microtask(loadKinds);
+  }
+
+  /// Fetches kind chips once per foodId; raw ingredients only, empty for dishes.
+  Future<void> loadKinds() async {
+    for (final item in List.of(items)) {
+      final id = (item['foodId'] ?? '').toString();
+      if (id.isEmpty || kindsRequested.contains(id)) continue;
+      kindsRequested.add(id);
+      try {
+        final result = await ref
+            .read(apiProvider)
+            .request(
+              'GET',
+              '/foods/kinds?foodId=${Uri.encodeQueryComponent(id)}',
+            );
+        final kinds = result is Map && result['kinds'] is List
+            ? (result['kinds'] as List)
+                  .whereType<Map>()
+                  .where((k) => k['query'] is String && k['food'] is Map)
+                  .map((k) => Map<String, dynamic>.from(k))
+                  .toList()
+            : <Map<String, dynamic>>[];
+        if (mounted) setState(() => kindsByFood[id] = kinds);
+      } catch (_) {
+        // Chips are optional; '음식 변경' search still works.
+      }
+    }
+  }
+
+  void selectKind(int index, Map<String, dynamic> kind) {
+    final food = Map<String, dynamic>.from(kind['food'] as Map);
+    setState(() {
+      // The kind name reproduces the server's category match on save.
+      items[index]['name'] = kind['query'];
+      items[index]['foodId'] = food['id'];
+      items[index]['source'] = food;
+      items[index].remove('_editedName');
+      items[index].remove('candidates');
+      kindsExpanded.remove(index);
+      changed(index);
+      formGeneration++;
+    });
+    Future.microtask(loadKinds);
+  }
+
+  List<Widget> kindChips(int i) {
+    final kinds = kindsByFood[(items[i]['foodId'] ?? '').toString()] ?? [];
+    if (kinds.isEmpty) return [];
+    final expanded = kindsExpanded.contains(i);
+    final shown = expanded ? kinds : kinds.take(shownKinds).toList();
+    return [
+      const SizedBox(height: 8),
+      const Text('종류가 다르면 골라 주세요. 비슷한 종류는 사진만으로 구분하기 어려워요.'),
+      Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        children: [
+          for (final kind in shown)
+            ActionChip(
+              label: Text(kind['query']),
+              onPressed: busy ? null : () => selectKind(i, kind),
+            ),
+          if (!expanded && kinds.length > shownKinds)
+            ActionChip(
+              label: Text('더 보기 (${kinds.length - shownKinds})'),
+              onPressed: () => setState(() => kindsExpanded.add(i)),
+            ),
+          ActionChip(
+            avatar: const Icon(Icons.search, size: 18),
+            label: const Text('코팅·가공 식품에서 찾기'),
+            onPressed: busy
+                ? null
+                : () => search(
+                    i,
+                    initial: foodDisplayName(items[i]),
+                    processed: true,
+                  ),
+          ),
+        ],
+      ),
+    ];
   }
 
   void changed([int? index]) {
@@ -1070,9 +1166,11 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
       items[index]['source'] = selected;
       items[index].remove('_editedName');
       items[index].remove('candidates');
+      kindsExpanded.remove(index);
       changed(index);
       formGeneration++;
     });
+    Future.microtask(loadKinds);
   }
 
   String weightLabel(Map item) {
@@ -1081,7 +1179,7 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
     final text = '중량: ${grams.toStringAsFixed(grams % 1 == 0 ? 0 : 1)} g';
     final m = item['weightMeasurement'];
     if (m is Map && m['method'] == 'AREA_HEIGHT') {
-      return '$text · AR 면적 × AI 높이';
+      return '$text · AR 면적 × ${measuredHeightName(m)}';
     }
     if (m is Map && m['method'] == 'AR_VOLUME') return '$text · AR 측정';
     if (item['weightEstimate'] is Map) {
@@ -1114,12 +1212,17 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
   String foodLabel(Map food) =>
       '${food['name']}${(food['manufacturer'] ?? '').toString().trim().isEmpty ? '' : ' · ${food['manufacturer']}'}';
 
-  Future<void> search(int index) async {
-    final controller = TextEditingController();
+  /// [processed] searches processed foods only (커피땅콩, 튀김땅콩 …) for coated or seasoned snacks.
+  Future<void> search(
+    int index, {
+    String initial = '',
+    bool processed = false,
+  }) async {
+    final controller = TextEditingController(text: initial);
     final query = await showDialog<String>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('음식 검색'),
+        title: Text(processed ? '코팅·가공 식품 검색' : '음식 검색'),
         content: TextField(
           controller: controller,
           decoration: const InputDecoration(labelText: '음식 이름'),
@@ -1140,7 +1243,10 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
     try {
       final results = await ref
           .read(apiProvider)
-          .request('GET', '/foods?query=${Uri.encodeQueryComponent(query)}');
+          .request(
+            'GET',
+            '/foods?query=${Uri.encodeQueryComponent(query)}${processed ? '&scope=processed' : ''}',
+          );
       if (!mounted) return;
       final selected = await showDialog<Map<String, dynamic>>(
         context: context,
@@ -1294,7 +1400,7 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                                 'AREA_HEIGHT')
                           Text(
                             '면적 ${(items[i]['weightMeasurement']['areaCm2'] as num).toStringAsFixed(1)} cm² × '
-                            'AI 평균 높이 ${(items[i]['weightMeasurement']['heightCm'] as num).toStringAsFixed(2)} cm × '
+                            '${measuredHeightName(items[i]['weightMeasurement'])} ${(items[i]['weightMeasurement']['heightCm'] as num).toStringAsFixed(2)} cm × '
                             '${items[i]['weightMeasurement']['densityGroupLabel']} 밀도 ${items[i]['weightMeasurement']['densityGPerMl']} g/mL'
                             '${items[i]['weightMeasurement']['majorCategory'] == null ? '' : ' (DB 분류: ${items[i]['weightMeasurement']['majorCategory']})'}',
                             style: Theme.of(context).textTheme.bodySmall,
@@ -1365,6 +1471,7 @@ class _MealState extends ConsumerState<MealScreen> with WidgetsBindingObserver {
                         NutritionTable(values: items[i]['nutrition'] ?? {}),
                         if (items[i]['source']?['fallbackNotice'] is String)
                           Text(items[i]['source']['fallbackNotice']),
+                        ...kindChips(i),
                         if ((items[i]['foodId'] ?? '').toString().isEmpty &&
                             (items[i]['candidates'] as List? ?? [])
                                 .isNotEmpty) ...[

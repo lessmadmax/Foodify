@@ -44,6 +44,19 @@ class OpenAiClientTest {
         assertTrue(request.get().contains("사진에 여러 음식이 있으면 각각 구분"));
         assertTrue(request.get().contains("후보 하나를 모든 음식에 적용하지 마세요"));
     }
+    @Test void lowScoreCandidatesAreLeftOutAndMarkedOutOfClass() {
+        var evidence=java.util.Map.<String,Object>of("method","gallery_photos","foodRecognition",java.util.Map.of("model","Food-101-93M","predictions",List.of(java.util.Map.of("imageIndex",0,"candidates",List.of(java.util.Map.of("label","foie_gras","score",0.11))))));
+        client(2).analyze(List.of(new byte[]{1}),evidence);
+        assertFalse(request.get().contains("foie_gras"));
+        assertTrue(request.get().contains("LOW_TOP_SCORE"));
+        assertTrue(request.get().contains("101종 분류 밖일 가능성이 크니"));
+    }
+    @Test void asksForCategoryNameWhenRawKindIsUncertain() {
+        client(2).analyze(List.of(new byte[]{1}));
+        assertTrue(request.get().contains("확실하지 않으면 '견과류'"));
+        assertTrue(request.get().contains("코팅·당·양념이 보이면 이름에 드러내세요"));
+        assertEquals("v4-category-names",db.queryForObject("SELECT prompt_version FROM ai_usage ORDER BY created_at DESC LIMIT 1",String.class));
+    }
     OpenAiClient client(int limit){return new OpenAiClient("test-key","test-model","http://127.0.0.1:"+server.getAddress().getPort(),limit,json,db,tx);}
     @Test void chatSendsRolesAndFreshEvidenceWithoutExternalStorage(){
         response=json.write(java.util.Map.of("status","completed","output",List.of(java.util.Map.of("content",List.of(java.util.Map.of("type","output_text","text","{\"answer\":\"저녁 안내\"}"))))));

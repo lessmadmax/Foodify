@@ -49,6 +49,20 @@ class WorkflowTest {
         mvc.perform(get("/api/v1/meals/"+first.path("id").asText()).header("Authorization","Bearer "+other)).andExpect(status().isNotFound());
         mvc.perform(get("/api/v1/photos/"+first.path("photos").get(0).path("id").asText()).header("Authorization","Bearer "+other)).andExpect(status().isNotFound());
     }
+    @Test void arPreviewUsesMeasuredHeightWithoutAi() throws Exception {
+        // "other" has no AI consent: the preview makes no AI call, so it is still allowed.
+        var preview=body(mvc.perform(post("/api/v1/ar/preview").header("Authorization","Bearer "+other).contentType("application/json")
+            .content("{\"foodName\":\"시험 음식\",\"foodId\":\"test-food\",\"areaCm2\":20,\"heightCm\":1.5,\"distanceMm\":300}"))
+            .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertEquals(30.0,preview.path("volumeMl").asDouble(),1e-9);
+        assertEquals(1.5,preview.path("heightCm").asDouble(),1e-9);
+        assertTrue(preview.path("grams").asDouble()>0);
+        for(String bad:new String[]{"\"areaCm2\":3000,\"heightCm\":1","\"areaCm2\":20,\"heightCm\":0","\"areaCm2\":20,\"heightCm\":31"})
+            mvc.perform(post("/api/v1/ar/preview").header("Authorization","Bearer "+token).contentType("application/json")
+                .content("{\"foodName\":\"시험 음식\","+bad+"}")).andExpect(status().isBadRequest());
+        mvc.perform(post("/api/v1/ar/preview").contentType("application/json")
+            .content("{\"foodName\":\"시험 음식\",\"areaCm2\":20,\"heightCm\":1}")).andExpect(status().isUnauthorized());
+    }
     @Test void consentIsMemberScopedVersionedAndRevocable() throws Exception {
         mvc.perform(get("/api/v1/me/ai-consent").header("Authorization","Bearer "+other))
             .andExpect(status().isOk()).andExpect(jsonPath("$.accepted").value(false));

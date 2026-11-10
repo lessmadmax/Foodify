@@ -79,7 +79,16 @@ public class MealService {
             if(ar.path("distanceMm").isNumber()) m.put("distanceMm",ar.path("distanceMm").asDouble());
             // Depth-based volume is kept only as a reference for later comparison.
             if(ar.path("depthVolumeMl").isNumber() && ar.path("depthVolumeMl").asDouble()>0) m.put("depthVolumeMl",ar.path("depthVolumeMl").asDouble());
-            m.put("heightSource","OpenAI 평균 높이 "+HEIGHT_CALLS+"회 중앙값");
+            // Device-measured height (depth or ARCore feature points) when the app had one; AI height otherwise.
+            String method=ar.path("heightMethod").asText("AI");
+            if(!Set.of("DEPTH","FEATURE_POINTS").contains(method)) method="AI";
+            m.put("heightMethod",method);
+            m.put("heightSource",switch(method) {
+                case "DEPTH" -> "기기 깊이 측정(음식 윗면과 접시 면의 차이 평균)";
+                case "FEATURE_POINTS" -> "ARCore 특징점 측정(음식 위 점과 접시 면의 차이 평균)";
+                default -> "OpenAI 평균 높이 "+HEIGHT_CALLS+"회 중앙값";
+            });
+            if(!"AI".equals(method) && ar.path("heightSampleCount").isInt()) m.put("heightSampleCount",Math.min(1_000_000,Math.max(0,ar.path("heightSampleCount").asInt())));
         }
         m.put("qualityHold",ar.path("qualityHold").asBoolean(false));
         m.put("holdReasons",reasons); m.put("majorCategory",major); m.put("densityGroup",group.id()); m.put("densityGroupLabel",group.label());

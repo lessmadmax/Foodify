@@ -35,6 +35,17 @@ public class FoodService {
         }
         return List.of();
     }
+    /** Name-contains search among processed foods only ("땅콩" -> 커피땅콩, 땅콩버터 ...), skipping raw/category matches. */
+    public List<Map<String,Object>> searchProcessed(String query) {
+        if(query==null || query.isBlank() || query.length()>100) return List.of();
+        String normalized=FoodSearchTerms.normalize(query);
+        String term=normalized.replace("!","!!").replace("%","!%").replace("_","!_");
+        String name=normalizedColumn("name");
+        var rows=db.queryForList("SELECT * FROM foods WHERE "+usable()+" AND category='가공식품' AND "+name+" LIKE ? ESCAPE '!' ORDER BY CASE WHEN "+name+"=? THEN 0 ELSE 1 END, LENGTH(name), name, id LIMIT 30","%"+term+"%",normalized);
+        for(var row:rows) { row.put("searchTerm",normalized); row.put("searchFallback",false); }
+        return rows;
+    }
+    public Map<String,Object> kinds(String foodId) { return categories.kinds(foodId); }
     private static String usable() {
         return "searchable=TRUE AND basis_unit='g' AND basis_grams>0 AND kcal>=0 AND carbs>=0 AND protein>=0 AND fat>=0";
     }

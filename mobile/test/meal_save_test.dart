@@ -51,8 +51,15 @@ class MealApi extends Api {
   dynamic payload;
   Completer<dynamic>? slowRead;
   final write = Completer<dynamic>();
+  List<Map<String, dynamic>> kinds = [];
+  final foodRequests = <String>[];
   @override
   Future<dynamic> request(String method, String path, {dynamic data}) async {
+    if (method == 'GET' && path.startsWith('/foods')) {
+      foodRequests.add(path);
+      if (path.startsWith('/foods/kinds')) return {'kinds': kinds};
+      return [];
+    }
     if (method == 'GET') {
       gets++;
       if (gets > 1 && slowRead != null) return slowRead!.future;
@@ -160,6 +167,91 @@ void main() {
     expect(find.text('무청김치'), findsOneWidget);
     expect(find.textContaining('김치류 대체 영양정보'), findsOneWidget);
     expect(find.text('200.0 kcal'), findsNWidgets(2));
+  });
+  testWidgets('원재료는 같은 분류의 종류 칩으로 바꾸고 저장', (tester) async {
+    Map<String, dynamic> kind(String name, int kcal) => {
+      'query': name,
+      'food': {
+        'id': 'category:$name',
+        'name': name,
+        'matchType': 'CATEGORY_FALLBACK',
+        'basis_unit': 'g',
+        'basis_grams': 100,
+        'searchable': true,
+        'kcal': kcal,
+        'carbs': 20,
+        'protein': 20,
+        'fat': 50,
+        'source': '공공 영양 DB',
+      },
+    };
+    final data = record(complete: true);
+    data['items'][0]['name'] = '아몬드';
+    data['items'][0]['foodId'] = 'category:아몬드';
+    final api = MealApi()
+      ..readRecord = data
+      ..kinds = [
+        kind('땅콩', 562),
+        for (var n = 1; n <= 9; n++) kind('견과$n', 500),
+      ];
+    await mountMeal(tester, api);
+    expect(
+      api.foodRequests,
+      contains('/foods/kinds?foodId=${Uri.encodeQueryComponent('category:아몬드')}'),
+    );
+    expect(find.textContaining('종류가 다르면 골라 주세요'), findsOneWidget);
+    expect(find.text('견과9'), findsNothing);
+    await tester.ensureVisible(find.text('더 보기 (2)'));
+    await tester.tap(find.text('더 보기 (2)'));
+    await tester.pumpAndSettle();
+    expect(find.text('견과9'), findsOneWidget);
+    await tester.tap(find.text('땅콩'));
+    await tester.pumpAndSettle();
+    expect(find.text('땅콩'), findsWidgets);
+    expect(find.text('아몬드'), findsNothing);
+    await tester.ensureVisible(find.text('수정 저장 · 영양 재계산'));
+    await tester.tap(find.text('수정 저장 · 영양 재계산'));
+    await tester.pump();
+    expect(api.payload['items'][0]['name'], '땅콩');
+    expect(api.payload['items'][0]['foodId'], 'category:땅콩');
+    api.write.complete(record(complete: true));
+    await tester.pumpAndSettle();
+  });
+  testWidgets('코팅·가공 식품 찾기는 가공식품 범위로 검색', (tester) async {
+    final data = record(complete: true);
+    data['items'][0]['name'] = '땅콩';
+    data['items'][0]['foodId'] = 'category:땅콩';
+    final api = MealApi()
+      ..readRecord = data
+      ..kinds = [
+        {
+          'query': '아몬드',
+          'food': {'id': 'category:아몬드', 'name': '아몬드'},
+        },
+      ];
+    await mountMeal(tester, api);
+    await tester.ensureVisible(find.text('코팅·가공 식품에서 찾기'));
+    await tester.tap(find.text('코팅·가공 식품에서 찾기'));
+    await tester.pumpAndSettle();
+    expect(find.text('코팅·가공 식품 검색'), findsOneWidget);
+    await tester.enterText(find.byType(TextField).last, '커피땅콩');
+    await tester.tap(find.text('검색'));
+    await tester.pumpAndSettle();
+    expect(
+      api.foodRequests.last,
+      '/foods?query=${Uri.encodeQueryComponent('커피땅콩')}&scope=processed',
+    );
+  });
+  testWidgets('요리 등 종류가 없는 음식은 칩을 표시하지 않음', (tester) async {
+    await mountMeal(tester, MealApi());
+    expect(find.textContaining('종류가 다르면 골라 주세요'), findsNothing);
+    expect(find.text('코팅·가공 식품에서 찾기'), findsNothing);
+  });
+  test('AR 높이 출처 표시: 깊이·특징점 측정과 AI(이전 기록 포함)', () {
+    expect(measuredHeightName({'heightMethod': 'DEPTH'}), '깊이 측정 높이');
+    expect(measuredHeightName({'heightMethod': 'FEATURE_POINTS'}), '특징점 측정 높이');
+    expect(measuredHeightName({'heightMethod': 'AI'}), 'AI 평균 높이');
+    expect(measuredHeightName({}), 'AI 평균 높이');
   });
   test('미완료 이유에 빠진 영양소와 확인 체크를 구분', () {
     final item = Map<String, dynamic>.from((record()['items'] as List).first);
