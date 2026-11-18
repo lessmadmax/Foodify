@@ -1,0 +1,73 @@
+# 음식 사진 분석 및 AR 중량 산출 시퀀스
+
+일반 사진 분석 결과를 먼저 산출하고, 사용자가 선택한 음식에 한해 별도 AR 촬영으로 중량을 갱신한다. 화살표에는 단계 사이에 전달되는 주요 입출력값을 표시했다.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 사용자
+    participant M as Flutter 앱
+    participant D as 기기 분석 모듈
+    participant S as Spring Boot 서버
+    participant A as gpt-4o-mini API
+    participant N as 영양 DB
+
+    U->>M: 음식 사진 촬영 또는 갤러리 선택
+    M->>D: 사진 1~3장
+    D->>D: Food-101-93M 음식 분류
+    D-->>M: 사진별 후보 3개(label, score)
+    M->>S: POST /meals<br/>사진, captureInfo, 멱등 키
+    S->>S: JPEG 정리, 촬영 근거 검증·저장
+    S-->>M: mealId, 분석 상태 QUEUED
+    S->>S: 작업 처리기 실행<br/>Top-1 0.6 미만 후보는 프롬프트에서 제외
+    S->>A: 사진, 유효 후보, 촬영 근거
+    A-->>S: 음식명, 기본 grams, 중량 범위·가정<br/>ingredients, uncertainty
+    S->>N: 음식명·별칭·원재료·범주 검색
+    N-->>S: foodId 후보, 기준 중량·영양값, 대분류
+    opt DB 후보 선택 보조가 필요한 경우
+        S->>A: 음식명·재료와 검색 후보 목록
+        A-->>S: 후보 안에서 선택한 foodId 또는 null
+    end
+    S->>S: 기본 grams로 영양값 계산·저장
+    M->>S: 식단 결과 조회
+    S-->>M: 음식명, grams, kcal·탄수화물·단백질·지방<br/>계산 근거, 완료 상태
+    M-->>U: 최초 분석 결과 표시·수정 제공
+
+    opt 사용자가 특정 음식의 AR 중량 측정을 선택
+        U->>M: 측정할 음식 선택(name, foodId)
+        M->>D: AR 촬영 요청
+        D->>D: ARCore 약 5초 수집
+        D-->>M: 대표 사진, 깊이(mm), 신뢰도<br/>카메라 자세·내부 파라미터, 특징점
+        U->>M: 음식·제외 점 지정
+        M->>D: 대표 사진, 점(u,v,label)
+        D->>D: MobileSAM 마스크·다각형 생성
+        D-->>M: foodPolygons, 윤곽 초안
+        M-->>U: 윤곽 표시
+        U->>M: 윤곽 확인 또는 직접 수정
+        M->>D: 확인 윤곽과 AR 촬영 데이터
+        D->>D: 깊이 정렬·거리·면적·높이 계산
+        D-->>M: areaCm2, distanceMm, 축척<br/>measuredHeightCm 또는 null, 높이 출처
+        alt 기기 평균 높이 확보
+            M->>S: POST /ar/preview<br/>name, foodId, areaCm2, heightCm
+        else 기기 평균 높이 미확보
+            M->>S: POST /ar/height<br/>사진, name, foodId, 면적·거리·축척
+            S->>A: 같은 조건으로 평균 높이 추정 3회 병렬 요청
+            A-->>S: heightCm, assumptions
+            S->>S: 성공한 높이 응답의 중앙값 적용
+        end
+        S->>N: foodId의 식품 대분류 확인
+        N-->>S: majorCategory
+        S->>S: 대분류로 대표 밀도 선택<br/>V=A×h, grams=V×밀도
+        S-->>M: 중량 미리보기, 면적·높이·부피·밀도 근거
+        M-->>U: AR 예상 중량 표시
+        U->>M: 이 중량 적용
+        M->>S: PATCH /meals/{id}<br/>arMeasurement, name, foodId, 식단 버전
+        S->>N: 확정 foodId의 영양 기준 조회
+        N-->>S: 기준 중량·영양값·자료원
+        S->>S: 면적×높이×밀도로 중량 재계산<br/>DB 기준 영양값으로 영양 재계산·저장
+        S-->>M: 갱신 grams, nutrition, weightMeasurement, 상태
+        M-->>U: 갱신된 음식별 중량·영양 결과
+    end
+    Note over S,N: 영양량 = DB 기준 영양량 × 최종 중량 ÷ DB 기준 중량<br/>깊이 적분 부피는 참고값이며 최종 중량 산식에는 사용하지 않음
+
+```

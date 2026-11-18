@@ -34,6 +34,8 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
 
   /// Area × height result: on-device scale + server height/weight preview.
   Map<String, dynamic>? scale, height;
+  Map<String, dynamic>? vesselReference;
+  bool vesselAttempted = false;
   String heightError = '';
   String? framePath;
   String message = '';
@@ -82,6 +84,8 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
       preview = data;
       foodRegion = null;
       baseRegion = null;
+      vesselReference = null;
+      vesselAttempted = false;
       result = null;
       scale = null;
       height = null;
@@ -91,12 +95,12 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
       tapNote = '사진에서 음식을 눌러 주세요. 여러 조각이면 2~3곳을 누르면 전체가 잡힙니다.';
     });
     // Encode the photo for segmentation ahead of the first tap (about 1 s on the S23).
-    channel
-        .invokeMethod('prepareSegment', {'framePath': framePath})
-        .catchError((Object e) {
-          debugPrint('MobileSAM prepare failed: $e');
-          return null;
-        });
+    channel.invokeMethod('prepareSegment', {'framePath': framePath}).catchError(
+      (Object e) {
+        debugPrint('MobileSAM prepare failed: $e');
+        return null;
+      },
+    );
   }
 
   /// Tap points on the photo: [u, v, label], label 1 = food, 0 = not food.
@@ -235,7 +239,7 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
           title: base ? '접시 영역 지정' : '음식 영역 지정',
           guidance: base
               ? '음식을 포함한 평평한 접시 영역을 지정하세요. 음식 부분은 자동으로 제외됩니다.'
-              : '${widget.foodName}의 테두리를 따라 점을 찍으세요. 접시 기준면은 음식 바로 바깥에서 자동으로 잡습니다.',
+              : '${widget.foodName}의 테두리를 따라 점을 찍으세요.',
         ),
       ),
     );
@@ -255,6 +259,35 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
     }
   }
 
+  Future<void> detectVessel() async {
+    if (vesselAttempted || widget.api == null) return;
+    vesselAttempted = true;
+    final frame = framePath;
+    try {
+      final bytes = await File(preview!['imagePath'] as String).readAsBytes();
+      final answer = Map<String, dynamic>.from(
+        await widget.api!.request(
+              'POST',
+              '/ar/vessel',
+              data: {
+                'foodName': widget.foodName,
+                'imageBase64': base64Encode(bytes),
+              },
+            )
+            as Map,
+      );
+      if (mounted && framePath == frame) vesselReference = answer;
+    } catch (_) {
+      if (mounted && framePath == frame) {
+        vesselReference = {
+          'usable': false,
+          'vesselType': 'unknown',
+          'reason': 'detection_unavailable',
+        };
+      }
+    }
+  }
+
   Future<void> estimate() async {
     setState(() {
       result = null;
@@ -262,11 +295,14 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
       height = null;
       heightError = '';
     });
+    await detectVessel();
+    if (!mounted) return;
     final region = {
       'framePath': framePath,
       'foodName': widget.foodName,
       'foodRegion': foodRegion,
       'baseRegion': baseRegion,
+      if (vesselReference != null) 'vesselReference': vesselReference,
     };
     // Depth volume: reference only (kept for later comparison with the scale).
     Map<String, dynamic>? depth;
@@ -351,7 +387,8 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
   /// Explains a distance taken from ARCore feature points instead of plate depth (white bowls/desks).
   static String? distanceSourceNote(Object? source) => switch (source) {
     'feature_points_plate' => '접시 면 깊이가 부족해 주변 특징점으로 거리를 쟀습니다.',
-    'feature_points_food' => '음식 위 특징점으로 거리를 쟀습니다. 음식 윗면 기준이라 면적이 조금 작게 나올 수 있습니다.',
+    'feature_points_food' =>
+      '음식 위 특징점으로 거리를 쟀습니다. 음식 윗면 기준이라 면적이 조금 작게 나올 수 있습니다.',
     _ => null,
   };
 
@@ -495,12 +532,6 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
                   foodRegion == null ? '② 음식 영역 직접 지정' : '② 음식 영역 직접 수정',
                 ),
               ),
-              OutlinedButton(
-                onPressed: busy ? null : () => run(() => editRegion(true)),
-                child: Text(
-                  baseRegion == null ? '접시 영역 직접 지정(선택)' : '접시 영역 직접 지정 ✓',
-                ),
-              ),
             ],
           ),
           FilledButton(
@@ -508,11 +539,6 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
             child: const Text('③ 중량 다시 계산'),
           ),
         ],
-        if (preview != null && baseRegion == null)
-          const Text(
-            '접시 기준면: 음식 테두리 바로 바깥 띠에서 자동 계산. 부피가 이상하면 접시 영역을 직접 지정해 보세요.',
-            style: TextStyle(fontSize: 12),
-          ),
         if (scale != null) ...[
           const SizedBox(height: 8),
           Text(
@@ -552,9 +578,15 @@ class _ArWeightScreenState extends State<ArWeightScreen> {
                     if (height!['heightSampleCount'] is int)
                       'heightSampleCount': height!['heightSampleCount'],
                     'distanceMm': height!['distanceMm'],
+                    if (scale?['vesselReference'] != null)
+                      'vesselReference': scale!['vesselReference'],
                     if (volume != null) 'depthVolumeMl': volume,
-                    'qualityHold': false,
-                    'holdReasons': const <String>[],
+                    'qualityHold':
+                        (scale?['vesselReference'] as Map?)?['applied'] == true,
+                    'holdReasons':
+                        (scale?['vesselReference'] as Map?)?['applied'] == true
+                        ? const ['기본 깊이로 기준면을 근사한 미검증 측정값']
+                        : const <String>[],
                   }),
             child: const Text('이 중량 적용'),
           ),
@@ -613,5 +645,7 @@ class _RegionPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_RegionPainter old) =>
-      old.polygons != polygons || old.taps.length != taps.length || old.taps != taps;
+      old.polygons != polygons ||
+      old.taps.length != taps.length ||
+      old.taps != taps;
 }

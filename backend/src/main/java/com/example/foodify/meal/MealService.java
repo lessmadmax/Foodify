@@ -91,6 +91,14 @@ public class MealService {
             if(!"AI".equals(method) && ar.path("heightSampleCount").isInt()) m.put("heightSampleCount",Math.min(1_000_000,Math.max(0,ar.path("heightSampleCount").asInt())));
         }
         m.put("qualityHold",ar.path("qualityHold").asBoolean(false));
+        if(ar.path("vesselReference").isObject()) {
+            var vessel=com.example.foodify.ai.VesselReference.measurement(ar.path("vesselReference"));
+            m.put("vesselReference",vessel);
+            if(Boolean.TRUE.equals(vessel.get("applied"))) {
+                m.put("qualityHold",true);
+                if(reasons.size()<10) reasons.add("기본 깊이로 기준면을 근사한 미검증 측정값");
+            }
+        }
         m.put("holdReasons",reasons); m.put("majorCategory",major); m.put("densityGroup",group.id()); m.put("densityGroupLabel",group.label());
         m.put("densityGPerMl",group.density()); m.put("densityBasis",group.basis()); m.put("densitySource","FAO/INFOODS Density Database v2.0");
         m.put("volumeValidated",false); m.put("measuredAt",System.currentTimeMillis());

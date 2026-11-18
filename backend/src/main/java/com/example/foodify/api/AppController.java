@@ -82,6 +82,14 @@ public class AppController {
         return json.write(Map.of("summary",meals.summary(member,from,to),"revisions",revisions,"goals",goals));
     }
     /** AR weight: AI search box for one food in the AR frame (JSON body: foodName, imageBase64). */
+    @PostMapping("/ar/vessel") public Object vessel(Principal p,@RequestBody JsonNode body) {
+        AiConsent.require(db,p.getName());
+        String name=body.path("foodName").asText("").trim(),encoded=body.path("imageBase64").asText("");
+        if(name.isEmpty()||name.length()>100||encoded.isEmpty()||encoded.length()>4_000_000) throw ApiError.bad("INVALID_VESSEL_REQUEST");
+        byte[] image;
+        try {image=Base64.getDecoder().decode(encoded);} catch(IllegalArgumentException e) {throw ApiError.bad("INVALID_VESSEL_REQUEST");}
+        return ai.locateVessel(image,name);
+    }
     @PostMapping("/ar/food-box") public Object foodBox(Principal p,@RequestBody JsonNode body) {
         AiConsent.require(db,p.getName());
         String name=body.path("foodName").asText("").trim(),encoded=body.path("imageBase64").asText("");

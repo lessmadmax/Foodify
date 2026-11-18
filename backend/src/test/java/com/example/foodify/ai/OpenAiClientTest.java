@@ -85,5 +85,17 @@ class OpenAiClientTest {
         response=output("{\"heightCm\":45,\"assumptions\":[]}");
         assertEquals("AI_INVALID_OUTPUT",assertThrows(ApiError.class,()->client(5).estimateHeight(new byte[]{1},"쌀밥",300,0.1,40,30,20.2)).code);
     }
+    @Test void vesselRequestFindsRimWithoutAskingForHeightOrWeight() {
+        response=output("{\"vesselType\":\"unknown\",\"confidence\":\"low\",\"rimPoints\":[]}");
+        var answer=client(5).locateVessel(new byte[]{1},"밥");
+        assertEquals(false,answer.get("usable"));
+        var sent=json.read(request.get());
+        assertFalse(sent.path("store").asBoolean());
+        assertTrue(sent.path("text").path("format").path("strict").asBoolean());
+        var prompt=sent.path("input").get(0).path("content").get(0).path("text").asText();
+        assertTrue(prompt.contains("깊이·두께·중량 숫자는 추정하지 마세요"));
+        assertTrue(prompt.contains("테두리 평면"));
+        assertFalse(prompt.contains("5.8"));
+    }
     @Test void incompleteResponseIsNotAccepted(){response="{\"status\":\"incomplete\",\"output\":[]}";assertEquals("OPENAI_INCOMPLETE",assertThrows(ApiError.class,()->client(2).analyze(List.of(new byte[]{1}))).code);}
 }

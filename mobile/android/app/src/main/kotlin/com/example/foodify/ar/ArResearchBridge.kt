@@ -194,7 +194,17 @@ class ArResearchBridge(private val activity:Activity,messenger:BinaryMessenger) 
         val siblings=f.parentFile!!.listFiles().orEmpty().filter {it.isDirectory && it.name.matches(Regex("frame-[0-9]{2}"))}.sortedBy {it.name}.take(10)
         val fused=runCatching {ArFusion.combine(reference,siblings.mapNotNull {runCatching {observation(it)}.getOrNull()}).frame}.getOrDefault(reference.frame)
         val points=featurePoints(siblings,reference.pose)
-        return ArVolume.scale(fused,food,base,points)+mapOf("featurePointCount" to points.size)
+        val vessel=input.optJSONObject("vesselReference")
+        if(vessel!=null && vessel.optBoolean("usable",false)) {
+            val rim=vessel.optJSONArray("rimPoints")
+            val coordinates=if(rim==null) emptyList() else (0 until rim.length()).map {i->
+                val p=rim.getJSONArray(i);Pair(p.getDouble(0),p.getDouble(1))}
+            val detection=ArVessel.Detection(vessel.optString("vesselType"),vessel.optString("confidence"),coordinates)
+            if(ArVessel.eligible(detection)) return ArVessel.scale(fused,food,detection,points)+mapOf("featurePointCount" to points.size)
+        }
+        return ArVolume.scale(fused,food,base,points)+mapOf("featurePointCount" to points.size,
+            "vesselReference" to mapOf("applied" to false,"vesselType" to (vessel?.optString("vesselType") ?: "unknown"),
+                "reason" to "vessel_not_available_or_uncertain","volumeValidated" to false))
     }
     /**
      * ARCore feature points of the session frames, one per id (latest frame wins), in the reference camera's

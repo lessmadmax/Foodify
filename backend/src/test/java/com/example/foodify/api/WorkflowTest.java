@@ -63,6 +63,32 @@ class WorkflowTest {
         mvc.perform(post("/api/v1/ar/preview").contentType("application/json")
             .content("{\"foodName\":\"시험 음식\",\"areaCm2\":20,\"heightCm\":1}")).andExpect(status().isUnauthorized());
     }
+    @Test void vesselDetectionRequiresAuthenticationConsentAndValidInput() throws Exception {
+        mvc.perform(post("/api/v1/ar/vessel").contentType("application/json").content("{}"))
+            .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/v1/ar/vessel").header("Authorization","Bearer "+other).contentType("application/json").content("{}"))
+            .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("AI_CONSENT_REQUIRED"));
+        mvc.perform(post("/api/v1/ar/vessel").header("Authorization","Bearer "+token).contentType("application/json").content("{\"foodName\":\"밥\",\"imageBase64\":\"%%%\"}"))
+            .andExpect(status().isBadRequest());
+    }
+    @Test void correctedVesselReferenceSurvivesMealSaveAsUnvalidated() throws Exception {
+        JsonNode meal=upload(UUID.randomUUID().toString());String id=meal.path("id").asText();
+        var vessel=new LinkedHashMap<String,Object>();
+        vessel.put("vesselType","flat_plate");vessel.put("applied",true);vessel.put("internalDepthCm",99);
+        vessel.put("rimDistanceMm",300);vessel.put("bottomDistanceMm",308);vessel.put("rimRmseMm",1);
+        vessel.put("rimInliers",.95);vessel.put("rimOffsetMm",300);vessel.put("rimSamples",24);
+        vessel.put("rimPoints",List.of(List.of(.2,.2),List.of(.5,.1),List.of(.8,.2),List.of(.9,.5),List.of(.8,.8),List.of(.5,.9),List.of(.2,.8),List.of(.1,.5)));
+        var measurement=Map.of("method","AREA_HEIGHT","areaCm2",20,"heightCm",1.5,
+            "heightMethod","DEPTH","heightSampleCount",30,"qualityHold",false,"vesselReference",vessel);
+        var patchBody=Map.of("version",0,"items",List.of(Map.of("name","시험 음식","foodId","test-food",
+            "grams",1,"confirmed",true,"arMeasurement",measurement)));
+        mvc.perform(patch("/api/v1/meals/"+id).header("Authorization","Bearer "+token).contentType("application/json").content(json.write(patchBody)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.items[0].weightMeasurement.vesselReference.applied").value(true))
+            .andExpect(jsonPath("$.items[0].weightMeasurement.vesselReference.internalDepthCm").value(.8))
+            .andExpect(jsonPath("$.items[0].weightMeasurement.qualityHold").value(true))
+            .andExpect(jsonPath("$.items[0].weightMeasurement.volumeValidated").value(false));
+    }
     @Test void consentIsMemberScopedVersionedAndRevocable() throws Exception {
         mvc.perform(get("/api/v1/me/ai-consent").header("Authorization","Bearer "+other))
             .andExpect(status().isOk()).andExpect(jsonPath("$.accepted").value(false));
